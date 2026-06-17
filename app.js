@@ -975,22 +975,41 @@
   /* ====================================================================
    *  MÀN HÌNH 7 — NHÀ CUNG CẤP
    * ==================================================================== */
-  async function renderNCC() {
+    async function renderNCC() {
+    toolbarBtn('Thêm nhà cung cấp', 'btn-primary', () => nccForm(), '➕');
     const [nccs, dhs] = await Promise.all([window.API.listNCC(), window.API.listDonHang()]);
     const active = dhs.filter(d => d.trang_thai !== C.PO_STATUS.DA_HUY);
     view().innerHTML = `<div class="ncc-grid">${nccs.map(n => {
       const po = active.filter(d => d.id_ncc === n.id_ncc);
       const total = po.reduce((a, b) => a + b.gia_tri_don_hang, 0);
       return `<div class="card ncc-card">
-        <div class="ncc-head"><b>${esc(n.id_ncc)}</b> ${esc(n.ten_ncc)}</div>
+        <div class="ncc-head"><span><b>${esc(n.id_ncc)}</b> ${esc(n.ten_ncc)}</span>
+          <span class="act"><button class="ibtn" data-edit="${n.id_ncc}" title="Sửa">✏️</button>
+          <button class="ibtn ibtn-danger" data-del="${n.id_ncc}" title="Xóa">🗑️</button></span></div>
         <div class="ncc-body">
-          <div class="mini-stat"><span>Nhóm phụ trách</span><strong>${n.nhom_phu_trach.join(', ')}</strong></div>
+          <div class="mini-stat"><span>Nhóm phụ trách</span><strong>${(n.nhom_phu_trach||[]).join(', ')}</strong></div>
           <div class="mini-stat"><span>Số đơn hàng</span><strong>${po.length}</strong></div>
           <div class="mini-stat"><span>Tổng giá trị</span><strong>${fmt(total)}</strong></div>
           <div class="mini-stat"><span>Điện thoại</span><strong>${esc(n.dien_thoai || '')}</strong></div>
           <small>${esc(n.dia_chi || '')}</small>
         </div></div>`;
-    }).join('')}</div>`;
+    }).join('') || emptyBox('Chưa có nhà cung cấp.')}</div>`;
+
+
+    $$('[data-edit]', view()).forEach(b => b.onclick = async () => {
+      const n = (await window.API.listNCC()).find(x => x.id_ncc === b.dataset.edit); nccForm(n);
+    });
+
+    $$('[data-del]', view()).forEach(b => b.onclick = () => openModal({
+      title: 'Xác nhận xóa', body: `<p>Xóa nhà cung cấp <b>${esc(b.dataset.del)}</b>?</p>`,
+      foot: [
+        { label: 'Hủy', class: 'btn-light', onClick: closeModal },
+        { label: 'Xóa', class: 'btn-danger', onClick: async () => {
+          try { await window.API.deleteNCC(b.dataset.del); closeModal(); toast('Đã xóa NCC', 'success'); renderNCC(); }
+          catch (e) { toast(e.message, 'error', 5000); }
+        } },
+      ],
+    }));
   }
 
   /* ====================================================================
@@ -1142,6 +1161,144 @@
       };
       rd.readAsArrayBuffer(file);
     }
+  }
+
+  /* ====================================================================
+   *  TẠO ĐƠN HÀNG LOẠT (Auto-Generate) — chọn kế hoạch + cấu hình
+   * ==================================================================== */
+  async function openAutoGenerate() {
+    const khs = await window.API.listKeHoach();
+    if (!khs.length) return toast('Hãy lập Kế hoạch trước', 'error');
+    const cts = await window.API.listCongTrinh();
+    const ctMap = Object.fromEntries(cts.map(c => [c.id_cong_trinh, c]));
+    const nccs = await window.API.listNCC();
+    const nhoms = await window.API.listNhom();
+    const ai = await window.API.aiStatus();
+
+    openModal({
+      title: '⚡ Tạo đơn hàng tự động hàng loạt',
+      body: `
+        <div class="form-grid">
+          <label class="col-2">Kế hoạch áp dụng *
+            <select id="ag_kh">${khs.map(k => `<option value="${k.id_ke_hoach}">${esc(k.thang_nam)} — ${esc(ctMap[k.id_cong_trinh]?.ten_cong_trinh || '')} (NS: ${fmt(k.tong_du_tru)})</option>`).join('')}</select>
+          </label>
+          <label>Giá trị tối thiểu / đơn (₫)<input id="ag_min" type="number" value="${C.ORDER_CONSTRAINTS.MIN_ORDER}"></label>
+          <label>Giá trị tối đa / đơn (₫)<input id="ag_max" type="number" value="${C.ORDER_CONSTRAINTS.MAX_ORDER}"></label>
+          <label>Giới hạn NCC (tùy chọn)
+            <select id="ag_ncc"><option value="">— Tất cả NCC —</option>${nccs.map(n => `<option value="${n.id_ncc}">${esc(n.id_ncc)} - ${esc(n.ten_ncc)}</option>`).join('')}</select></label>
+          <label>Giới hạn nhóm (tùy chọn)
+            <select id="ag_nhom"><option value="">— Tất cả nhóm —</option>${nhoms.map(n => `<option value="${n.id_nhom}">${esc(n.ten_nhom)}</option>`).join('')}</select></label>
+          <label class="col-2"><input type="checkbox" id="ag_dehu" style="width:auto"> Chỉ chọn vật tư "Dễ hư hỏng"</label>
+          <label class="col-2">Mức lấp đầy mỗi đơn: <b id="ag_fr_lbl">92%</b>
+            <input type="range" id="ag_fr" min="60" max="100" value="92" oninput="document.getElementById('ag_fr_lbl').textContent=this.value+'%'"></label>
+        </div>
+        <div class="alert sm">Hệ thống sẽ tự chọn vật tư, cân số lượng nguyên dương, và tách thành nhiều đơn sao cho mỗi đơn nằm trong [min, max] và tổng ≤ ngân sách kế hoạch.</div>`,
+      foot: [
+        { label: 'Hủy', class: 'btn-light', onClick: closeModal },
+        { label: '🧮 Bằng thuật toán', class: 'btn-primary', onClick: () => runAutoGenerate(false) },
+        { label: ai.nvidia ? '🤖 Bằng AI (NVIDIA)' : '🤖 AI (cần key)', class: 'btn-warn', onClick: () => runAutoGenerate(true) },
+      ],
+    });
+  }
+
+  async function runAutoGenerate(useAI) {
+    const idkh = $('#ag_kh').value;
+    const kh = await window.API.getKeHoach(idkh);
+    const minOrder = Number($('#ag_min').value), maxOrder = Number($('#ag_max').value);
+    if (minOrder <= 0 || maxOrder <= minOrder) return toast('Min/Max không hợp lệ', 'error');
+
+    // ngân sách còn lại của kế hoạch (trừ PO cũ)
+    const existPOs = (await window.API.listDonHangByKeHoach(idkh)).filter(d => d.trang_thai !== C.PO_STATUS.DA_HUY);
+    const used = existPOs.reduce((a, b) => a + b.gia_tri_don_hang, 0);
+    const budget = kh.tong_du_tru - used;
+    if (budget < minOrder) return toast(`Ngân sách còn lại ${fmt(budget)} không đủ tạo đơn`, 'error', 5000);
+
+    const params = {
+      thang_nam: kh.thang_nam, budget, minOrder, maxOrder,
+      opts: {
+        id_ncc: $('#ag_ncc').value || null,
+        id_nhom: $('#ag_nhom').value || null,
+        onlyDeHuHong: $('#ag_dehu').checked,
+        fillRatio: Number($('#ag_fr').value) / 100,
+      },
+    };
+
+    openModal({ title: 'Đang tạo đơn…', body: '<div class="loading">Đang cân đối ngân sách & sinh đơn…</div>', foot: [] });
+    const result = useAI ? await window.API.autoGeneratePOsAI(params) : await window.API.autoGeneratePOs(params);
+
+    if (!result.success) {
+      openModal({ title: '⚠️ Không tạo được', body: `<div class="alert alert-warn">${esc(result.error || 'Lỗi không xác định')}</div>`,
+        foot: [{ label: 'Quay lại', class: 'btn-light', onClick: openAutoGenerate }] });
+      return;
+    }
+    // tái dùng PO Preview: gắn planDraft + poPreview rồi mở preview
+    AppState.planDraft = kh;
+    AppState.poPreview = result;
+    AppState.cache.baseSpent = used;
+    showAutoPreview(result, kh, budget);
+  }
+
+  async function showAutoPreview(result, kh, budget) {
+    const nccMap = Object.fromEntries((await window.API.listNCC()).map(n => [n.id_ncc, n.ten_ncc]));
+    openModal({
+      wide: true,
+      title: `⚡ Xem trước ${result.purchase_orders.length} đơn tự động`,
+      body: `
+        ${result.warnings_general.length ? `<div class="alert alert-warn">${result.warnings_general.map(esc).join('<br>')}</div>` : ''}
+        <div class="po-preview">
+          ${result.purchase_orders.map(po => `
+            <div class="po-card">
+              <div class="po-head"><div><b>${esc(po.ma_don_hang)}</b><br><small>${esc(po.id_ncc)} — ${esc(nccMap[po.id_ncc] || '')}</small></div>
+                <div class="po-val">${fmt(po.gia_tri_don_hang)}</div></div>
+              ${po.warnings.length ? `<div class="alert alert-warn sm">${po.warnings.map(esc).join('<br>')}</div>` : ''}
+              <table class="tbl sm"><thead><tr><th>Mã</th><th>Tên</th><th>SL</th><th>Đơn giá</th><th>Thành tiền</th></tr></thead>
+                <tbody>${po._lines.map(l => `<tr><td>${esc(l.ma_hang)}</td><td>${esc(l.ten_hang_hoa)}</td><td>${l.so_luong}</td><td>${fmt(l.don_gia_thuc_te)}</td><td>${fmt(l.thanh_tien)}</td></tr>`).join('')}</tbody></table>
+            </div>`).join('')}
+        </div>
+        <div class="alert">Tổng phân bổ: <b>${fmt(result.budget_utilization.total_allocated)}</b> / Ngân sách còn lại: <b>${fmt(budget)}</b></div>`,
+      foot: [
+        { label: 'Hủy', class: 'btn-light', onClick: () => { AppState.poPreview = null; closeModal(); } },
+        { label: '🔄 Sinh lại', class: 'btn-light', onClick: openAutoGenerate },
+        { label: `✅ Xác nhận tạo ${result.purchase_orders.length} đơn`, class: 'btn-primary', onClick: () => commitPOs() },
+      ],
+    });
+  }
+
+  /* ====================================================================
+   *  CRUD NHÀ CUNG CẤP (nâng cấp màn NCC)
+   * ==================================================================== */
+  function nccForm(n) {
+    const e = n || {};
+    const nhomOpts = C.DANH_MUC_NHOM
+      .map(g => g.ma_nhom).filter((v, i, a) => a.indexOf(v) === i); // mã nhóm duy nhất
+    openModal({
+      title: n ? 'Sửa nhà cung cấp' : 'Thêm nhà cung cấp',
+      body: `
+        <div class="form-grid">
+          <label>Mã NCC ${n ? '' : '(tự sinh nếu trống)'}<input id="n_id" value="${esc(e.id_ncc || '')}" ${n ? 'readonly' : ''}></label>
+          <label>Tên NCC *<input id="n_ten" value="${esc(e.ten_ncc || '')}"></label>
+          <label class="col-2">Nhóm phụ trách (giữ Ctrl để chọn nhiều) *
+            <select id="n_nhom" multiple size="6">${nhomOpts.map(m => `<option value="${m}" ${(e.nhom_phu_trach || []).includes(m) ? 'selected' : ''}>${m}</option>`).join('')}</select></label>
+          <label>Điện thoại<input id="n_dt" value="${esc(e.dien_thoai || '')}"></label>
+          <label>Địa chỉ<input id="n_dc" value="${esc(e.dia_chi || '')}"></label>
+        </div>
+        <div class="alert sm">Lưu ý: thay đổi nhóm phụ trách sẽ ảnh hưởng ánh xạ Nhóm→NCC khi tạo đơn. Mã nhóm KHA dùng chung 4 nhóm con.</div>`,
+      foot: [
+        { label: 'Hủy', class: 'btn-light', onClick: closeModal },
+        { label: 'Lưu', class: 'btn-primary', onClick: async () => {
+          const ten = $('#n_ten').value.trim();
+          const nhom = $$('#n_nhom option', $('#modalBody')).filter(o => o.selected).map(o => o.value);
+          if (!ten) return toast('Nhập tên NCC', 'error');
+          if (!nhom.length) return toast('Chọn ít nhất 1 nhóm phụ trách', 'error');
+          await window.API.saveNCC({
+            id_ncc: e.id_ncc || $('#n_id').value.trim() || undefined,
+            ten_ncc: ten, nhom_phu_trach: nhom,
+            dien_thoai: $('#n_dt').value.trim(), dia_chi: $('#n_dc').value.trim(),
+          });
+          closeModal(); toast('Đã lưu nhà cung cấp', 'success'); renderNCC();
+        } },
+      ],
+    });
   }
 
 })(); // <-- ĐÓNG IIFE app.js

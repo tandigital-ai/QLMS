@@ -240,3 +240,6 @@ textarea { min-height: 64px; resize: vertical; }
 .print-tbl tfoot td { font-weight: 700; }
 .print-sign { display: flex; justify-content: space-around; margin-top: 50px; text-align: center; font-weight: 600; }
 .print-sign > div::after { content: ""; }
+.ncc-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.ncc-head .act { display: flex; gap: 4px; }
+input[type="range"] { padding: 0; }

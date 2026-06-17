@@ -447,6 +447,217 @@ Hãy chọn và sắp xếp tối đa 3 mã phù hợp nhất. CHỈ trả JSON 
   /* -------------------- 17. HELPER -------------------- */
   function fmt(n) { return (Number(n) || 0).toLocaleString('vi-VN') + ' ₫'; }
 
+    /* ====================================================================
+   *  18. AUTO-GENERATOR: Tự động sinh nhiều PO từ ngân sách (Thuật toán)
+   *  Input: { thang_nam, budget, minOrder, maxOrder, opts }
+   *    opts: { id_ncc?, id_nhom?, onlyDeHuHong?, fillRatio? (0.8..1) }
+   *  Cơ chế: chọn pool vật tư phù hợp -> rải đều thành các "túi" PO,
+   *  mỗi túi nhắm giá trị mục tiêu trong [min,max], số lượng nguyên dương,
+   *  tổng các túi <= budget. Trả về cùng cấu trúc buildPurchaseOrders.
+   * ==================================================================== */
+  async function autoGeneratePOs({ thang_nam, budget, minOrder, maxOrder, opts }) {
+    minOrder = minOrder ?? C.ORDER_CONSTRAINTS.MIN_ORDER;
+    maxOrder = maxOrder ?? C.ORDER_CONSTRAINTS.MAX_ORDER;
+    opts = opts || {};
+    const fillRatio = Math.min(1, Math.max(0.5, opts.fillRatio || 0.92));
+
+    if (!budget || budget < minOrder)
+      return { success: false, error: `Ngân sách ${fmt(budget)} nhỏ hơn giá trị tối thiểu 1 đơn ${fmt(minOrder)}.`, purchase_orders: [] };
+
+    // 1) Pool vật tư đủ điều kiện
+    let pool = await listData();
+    pool = pool.filter(it => {
+      if (opts.id_ncc && C.GROUP_TO_NCC[it.ma_nhom] !== opts.id_ncc) return false;
+      if (opts.id_nhom && it.id_nhom !== opts.id_nhom) return false;
+      if (opts.onlyDeHuHong && it.muc_do_hu_hong !== 'Dễ hư hỏng') return false;
+      return it.don_gia > 0;
+    });
+    if (!pool.length) return { success: false, error: 'Không có vật tư phù hợp bộ lọc đã chọn.', purchase_orders: [] };
+
+    // 2) Gom pool theo NCC (mỗi PO chỉ 1 NCC — Supplier Isolation)
+    const poolByNcc = {};
+    pool.forEach(it => {
+      const ncc = C.GROUP_TO_NCC[it.ma_nhom];
+      (poolByNcc[ncc] = poolByNcc[ncc] || []).push(it);
+    });
+
+    // 3) Số đơn tối đa khả thi theo ngân sách (mỗi đơn >= minOrder)
+    const targetPerPO = Math.round(maxOrder * fillRatio); // giá trị nhắm mỗi đơn
+    const maxPOByBudget = Math.floor(budget / minOrder);
+    if (maxPOByBudget < 1)
+      return { success: false, error: 'Ngân sách không đủ tạo dù một đơn.', purchase_orders: [] };
+
+    const nccKeys = Object.keys(poolByNcc);
+    const purchase_orders = [];
+    const warnings_general = [];
+    let remaining = budget;
+    let nccIdx = 0;
+
+    // 4) Vòng lặp tạo đơn cho tới khi hết ngân sách / không thể tạo thêm
+    let guard = 0;
+    while (remaining >= minOrder && guard < maxPOByBudget + nccKeys.length + 5) {
+      guard++;
+      const ncc = nccKeys[nccIdx % nccKeys.length];
+      nccIdx++;
+      const items = poolByNcc[ncc];
+      if (!items || !items.length) {
+        if (nccIdx % nccKeys.length === 0) break; // đã quay 1 vòng không tạo được gì
+        continue;
+      }
+      // mục tiêu cho đơn này: không vượt phần ngân sách còn lại, không vượt max
+      const cap = Math.min(maxOrder, remaining);
+      if (cap < minOrder) break;
+      const aim = Math.min(targetPerPO, cap);
+      const lines = packOnePO(items, aim, minOrder, cap);
+      if (!lines.length) { continue; }
+      const val = lines.reduce((a, l) => a + l.thanh_tien, 0);
+      if (val < minOrder) {
+        // không đạt min -> bỏ qua NCC này lần này
+        continue;
+      }
+      const code = await buildPoCode(thang_nam, ncc);
+      remaining -= val;
+      purchase_orders.push({
+        id_don_hang: uuid(), ma_don_hang: code, id_ncc: ncc,
+        gia_tri_don_hang: val, trang_thai: C.PO_STATUS.NHAP, ghi_chu: '[Tự động sinh]',
+        _lines: lines, warnings: [],
+      });
+    }
+
+    if (!purchase_orders.length)
+      return { success: false, error: 'Không thể tạo đơn với ràng buộc hiện tại (thử giảm min hoặc tăng ngân sách).', purchase_orders: [] };
+
+    const total_allocated = budget - remaining;
+    if (remaining >= minOrder)
+      warnings_general.push(`Còn dư ${fmt(remaining)} chưa phân bổ (đủ tạo thêm đơn nhưng pool vật tư hạn chế).`);
+
+    return {
+      success: true, purchase_orders, warnings_general,
+      budget_utilization: { total_allocated, budget_limit: budget, exceeded: false },
+    };
+  }
+
+  // Đóng gói 1 PO: chọn vật tư & cân số lượng nguyên để giá trị ~ aim, trong [floorMin, cap]
+  function packOnePO(items, aim, floorMin, cap) {
+    // xáo trộn nhẹ để các đơn khác nhau, ưu tiên đa dạng nhóm
+    const shuffled = items.slice().sort(() => Math.random() - 0.5);
+    const lines = [];
+    let sum = 0;
+    // chọn 3–6 mặt hàng
+    const wantLines = 3 + Math.floor(Math.random() * 4);
+    for (const it of shuffled) {
+      if (lines.length >= wantLines) break;
+      if (sum >= aim) break;
+      const price = it.don_gia;
+      if (price <= 0 || price > cap) continue;
+      const room = Math.min(aim, cap) - sum;
+      if (room < price) continue;
+      let qty = Math.max(1, Math.round(room / price / Math.max(1, wantLines - lines.length)));
+      // không để 1 dòng vượt cap
+      while (qty > 1 && (sum + qty * price) > cap) qty--;
+      if (qty < 1) qty = 1;
+      const thanh_tien = qty * price;
+      if (sum + thanh_tien > cap) continue;
+      lines.push({
+        ma_hang: it.ma_hang, ten_hang_hoa: it.ten_hang_hoa, dvt: it.dvt,
+        id_nhom: it.id_nhom, phan_loai_nhom_hang: it.phan_loai_nhom_hang, ma_nhom: it.ma_nhom,
+        so_luong: qty, don_gia_thuc_te: price, thanh_tien,
+      });
+      sum += thanh_tien;
+    }
+    // nếu chưa đạt min, tăng số lượng dòng đầu tiên cho tới khi đạt min (không vượt cap)
+    if (sum < floorMin && lines.length) {
+      const l0 = lines[0];
+      while (sum < floorMin && (sum + l0.don_gia_thuc_te) <= cap) {
+        l0.so_luong += 1; l0.thanh_tien += l0.don_gia_thuc_te; sum += l0.don_gia_thuc_te;
+      }
+    }
+    if (sum < floorMin) return []; // không đạt min -> bỏ
+    return lines;
+  }
+
+  /* ====================================================================
+   *  19. AUTO-GENERATOR bằng AI (NVIDIA NIM). Fallback -> thuật toán.
+   * ==================================================================== */
+  async function autoGeneratePOsAI(params) {
+    const key = await getSetting('nvidia_key');
+    if (!key) {
+      const r = await autoGeneratePOs(params);
+      r.warnings_general = r.warnings_general || [];
+      r.warnings_general.unshift('Chưa có NVIDIA key — đã dùng thuật toán nội bộ.');
+      return r;
+    }
+    try {
+      const pool = (await listData())
+        .filter(it => (!params.opts?.id_ncc || C.GROUP_TO_NCC[it.ma_nhom] === params.opts.id_ncc)
+          && (!params.opts?.id_nhom || it.id_nhom === params.opts.id_nhom)
+          && it.don_gia > 0)
+        .slice(0, 120)
+        .map(it => ({ ma_hang: it.ma_hang, ten: it.ten_hang_hoa, dvt: it.dvt, gia: it.don_gia,
+          ncc: C.GROUP_TO_NCC[it.ma_nhom], nhom: it.phan_loai_nhom_hang, id_nhom: it.id_nhom }));
+      const payload = {
+        task: 'Phân bổ ngân sách thành nhiều PO. Mỗi PO 1 NCC, giá trị trong [min,max], số lượng nguyên dương, tổng <= budget.',
+        thang_nam: params.thang_nam, budget: params.budget,
+        min_order: params.minOrder ?? C.ORDER_CONSTRAINTS.MIN_ORDER,
+        max_order: params.maxOrder ?? C.ORDER_CONSTRAINTS.MAX_ORDER,
+        ncc_mapping: C.GROUP_TO_NCC, available_items: pool,
+        output_schema: '{"purchase_orders":[{"id_ncc":"NCCxxx","items":[{"ma_hang":"","so_luong":1,"don_gia_thuc_te":0}]}]}',
+      };
+      const ai = await nvidiaOptimize(payload, key);
+      const itemMap = Object.fromEntries((await listData()).map(d => [d.ma_hang, d]));
+      const purchase_orders = [];
+      for (const po of (ai.purchase_orders || [])) {
+        const lines = (po.items || []).map(x => {
+          const d = itemMap[x.ma_hang]; if (!d) return null;
+          const qty = Math.max(1, Math.round(x.so_luong || 1));
+          const price = x.don_gia_thuc_te || d.don_gia;
+          return { ma_hang: d.ma_hang, ten_hang_hoa: d.ten_hang_hoa, dvt: d.dvt,
+            id_nhom: d.id_nhom, phan_loai_nhom_hang: d.phan_loai_nhom_hang, ma_nhom: d.ma_nhom,
+            so_luong: qty, don_gia_thuc_te: price, thanh_tien: qty * price };
+        }).filter(Boolean);
+        if (!lines.length) continue;
+        const val = lines.reduce((a, l) => a + l.thanh_tien, 0);
+        const code = await buildPoCode(params.thang_nam, po.id_ncc);
+        const w = [];
+        const minO = params.minOrder ?? C.ORDER_CONSTRAINTS.MIN_ORDER;
+        const maxO = params.maxOrder ?? C.ORDER_CONSTRAINTS.MAX_ORDER;
+        if (val < minO) w.push(`Đơn dưới tối thiểu (${fmt(val)}).`);
+        if (val > maxO) w.push(`Đơn vượt tối đa (${fmt(val)}).`);
+        purchase_orders.push({ id_don_hang: uuid(), ma_don_hang: code, id_ncc: po.id_ncc,
+          gia_tri_don_hang: val, trang_thai: C.PO_STATUS.NHAP, ghi_chu: '[AI sinh]', _lines: lines, warnings: w });
+      }
+      if (!purchase_orders.length) throw new Error('AI không trả về đơn hợp lệ');
+      const total = purchase_orders.reduce((a, p) => a + p.gia_tri_don_hang, 0);
+      return { success: true, purchase_orders,
+        warnings_general: total > params.budget ? [`Tổng AI ${fmt(total)} vượt ngân sách.`] : [],
+        budget_utilization: { total_allocated: total, budget_limit: params.budget, exceeded: total > params.budget } };
+    } catch (e) {
+      const r = await autoGeneratePOs(params);
+      r.warnings_general = r.warnings_general || [];
+      r.warnings_general.unshift('AI lỗi (' + e.message + ') — đã dùng thuật toán nội bộ.');
+      return r;
+    }
+  }
+
+  /* ====================================================================
+   *  20. CRUD NHÀ CUNG CẤP
+   * ==================================================================== */
+  async function saveNCC(o) {
+    if (!o.id_ncc) {
+      // sinh mã NCC kế tiếp
+      const all = await getAll(S.NCC);
+      let max = 0; all.forEach(n => { const m = /NCC(\d+)/.exec(n.id_ncc); if (m) max = Math.max(max, +m[1]); });
+      o.id_ncc = 'NCC' + String(max + 1).padStart(3, '0');
+    }
+    return put(S.NCC, o);
+  }
+  async function deleteNCC(id) {
+    const dhs = await getByIndex(S.DON_HANG, 'id_ncc', id);
+    const active = dhs.filter(d => d.trang_thai !== C.PO_STATUS.DA_HUY);
+    if (active.length) throw new Error(`Không thể xóa: NCC đang có ${active.length} đơn hàng hiệu lực.`);
+    return del(S.NCC, id);
+  }
+
   /* -------------------- EXPORT API -------------------- */
   return {
     openDB, seedIfEmpty, uuid, nowStr, todayStr, fmt,
@@ -471,5 +682,9 @@ Hãy chọn và sắp xếp tối đa 3 mã phù hợp nhất. CHỈ trả JSON 
     exportBackup, importBackup,
     // raw (cho import excel)
     _bulkPut: bulkPut, _clear: clearStore, _store: S,
+        // auto-generator
+    autoGeneratePOs, autoGeneratePOsAI,
+    // CRUD NCC
+    saveNCC, deleteNCC,
   };
 })();
