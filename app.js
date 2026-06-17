@@ -253,31 +253,12 @@
     });
   }
 
-  /* -------------------- BOOTSTRAP -------------------- */
-  async function boot() {
-    try {
-      await window.API.openDB();
-      const seeded = await window.API.seedIfEmpty();
-      const ai = await window.API.aiStatus();
-      $('#aiStatusPill').textContent = 'AI: ' + ai.mode;
-      if (seeded) toast('Đã khởi tạo 300 mặt hàng mẫu', 'success');
-      await navigate('dashboard');
-    } catch (e) {
-      view().innerHTML = `<div class="empty">Không khởi tạo được CSDL: ${esc(e.message)}</div>`;
-      console.error(e);
-    }
-  }
-
-  // expose vài hàm render cho các phần sau (Phần 2 & 3 sẽ định nghĩa)
-  window.__APP__ = { navigate, toast, openModal, closeModal, statusBadge, esc, fmt, $, $$, view, toolbarBtn, emptyBox, card, AppState };
-
-  document.addEventListener('DOMContentLoaded', boot);
-
-    /* ====================================================================
+  /* ====================================================================
    *  MÀN HÌNH 3 — KẾ HOẠCH MUA SẮM
    * ==================================================================== */
   async function renderKeHoach() {
-    toolbarBtn('Lập kế hoạch mới', 'btn-primary', () => keHoachForm(), '➕');
+    toolbarBtn('Lập kế hoạch mới', 'btn-primary', () => keHoachForm(), '➕'),
+    toolbarBtn('⚡ Tạo đơn hàng loạt', 'btn-warn', () => openAutoGenerate());
     const [khs, cts] = await Promise.all([window.API.listKeHoach(), window.API.listCongTrinh()]);
     const ctMap = Object.fromEntries(cts.map(c => [c.id_cong_trinh, c]));
 
@@ -975,7 +956,7 @@
   /* ====================================================================
    *  MÀN HÌNH 7 — NHÀ CUNG CẤP
    * ==================================================================== */
-    async function renderNCC() {
+  async function renderNCC() {
     toolbarBtn('Thêm nhà cung cấp', 'btn-primary', () => nccForm(), '➕');
     const [nccs, dhs] = await Promise.all([window.API.listNCC(), window.API.listDonHang()]);
     const active = dhs.filter(d => d.trang_thai !== C.PO_STATUS.DA_HUY);
@@ -1300,5 +1281,25 @@
       ],
     });
   }
+
+  /* -------------------- BOOTSTRAP -------------------- */
+  async function boot() {
+    try {
+      await window.API.openDB();
+      const seeded = await window.API.seedIfEmpty();
+      const ai = await window.API.aiStatus();
+      $('#aiStatusPill').textContent = 'AI: ' + ai.mode;
+      if (seeded) toast('Đã khởi tạo 300 mặt hàng mẫu', 'success');
+      await navigate('dashboard');
+    } catch (e) {
+      view().innerHTML = `<div class="empty">Không khởi tạo được CSDL: ${esc(e.message)}</div>`;
+      console.error(e);
+    }
+  }
+
+  // expose vài hàm render cho các phần sau (Phần 2 & 3 sẽ định nghĩa)
+  window.__APP__ = { navigate, toast, openModal, closeModal, statusBadge, esc, fmt, $, $$, view, toolbarBtn, emptyBox, card, AppState };
+
+  document.addEventListener('DOMContentLoaded', boot);
 
 })(); // <-- ĐÓNG IIFE app.js
