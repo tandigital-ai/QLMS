@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QLMS Vật Tư Cấp Thoát Nước</title>
+  <link rel="stylesheet" href="style.css" />
+  <!-- SheetJS từ CDN chính thức (Export Excel) -->
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+  <!-- ============ LAYOUT KHUNG ============ -->
+  <div id="app">
+    <!-- Sidebar điều hướng -->
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="brand-logo">💧</div>
+        <div class="brand-text">
+          <strong>QLMS Vật Tư</strong>
+          <span>Cấp Thoát Nước</span>
+        </div>
+      </div>
+      <nav class="nav" id="mainNav">
+        <a class="nav-item" data-route="dashboard"><span class="ic">📊</span> Tổng quan</a>
+        <a class="nav-item" data-route="congtrinh"><span class="ic">🏗️</span> Công trình</a>
+        <a class="nav-item" data-route="kehoach"><span class="ic">📅</span> Kế hoạch mua sắm</a>
+        <a class="nav-item" data-route="donhang"><span class="ic">📦</span> Đơn đặt hàng</a>
+        <a class="nav-item" data-route="thanhtoan"><span class="ic">💰</span> Thanh toán & Công nợ</a>
+        <a class="nav-item" data-route="danhmuc"><span class="ic">🗂️</span> Danh mục vật tư</a>
+        <a class="nav-item" data-route="ncc"><span class="ic">🏭</span> Nhà cung cấp</a>
+        <a class="nav-item" data-route="baocao"><span class="ic">📈</span> Báo cáo</a>
+        <a class="nav-item" data-route="caidat"><span class="ic">⚙️</span> Cài đặt & Sao lưu</a>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="ai-status" id="aiStatusPill">AI: Nội bộ</div>
+        <small>v1.0 • IndexedDB</small>
+      </div>
+    </aside>
+
+    <!-- Vùng nội dung chính -->
+    <main class="main">
+      <header class="topbar">
+        <button class="hamburger" id="btnToggleSidebar">☰</button>
+        <h1 id="pageTitle">Tổng quan</h1>
+        <div class="topbar-actions" id="topbarActions"></div>
+      </header>
+      <section class="content" id="view"><!-- render động --></section>
+    </main>
+  </div>
+
+  <!-- ============ MODAL & TOAST ============ -->
+  <div class="modal-backdrop" id="modalBackdrop" hidden>
+    <div class="modal" id="modalBox">
+      <div class="modal-head">
+        <h3 id="modalTitle">Tiêu đề</h3>
+        <button class="modal-close" id="modalClose">✕</button>
+      </div>
+      <div class="modal-body" id="modalBody"></div>
+      <div class="modal-foot" id="modalFoot"></div>
+    </div>
+  </div>
+  <div class="toast-wrap" id="toastWrap"></div>
+
+  <!-- Vùng in ấn ẩn (PDF qua window.print) -->
+  <div id="printArea" class="print-area"></div>
+
+  <!-- Scripts theo thứ tự phụ thuộc -->
+  <script src="config.js"></script>
+  <script src="seed-data.js"></script>
+  <script src="api.js"></script>
+  <script src="app.js"></script>
+
+</body>
+</html>
