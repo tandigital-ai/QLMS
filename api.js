@@ -464,14 +464,19 @@ Hãy chọn và sắp xếp tối đa 3 mã phù hợp nhất. CHỈ trả JSON 
     if (!budget || budget < minOrder)
       return { success: false, error: `Ngân sách ${fmt(budget)} nhỏ hơn giá trị tối thiểu 1 đơn ${fmt(minOrder)}.`, purchase_orders: [] };
 
-    // 1) Pool vật tư đủ điều kiện
+    // 1) Pool vật tư đủ điều kiện — HỖ TRỢ NHIỀU NCC & NHIỀU NHÓM (Debug 1)
+    const nccSet  = Array.isArray(opts.id_ncc)  ? opts.id_ncc.filter(Boolean)
+                  : (opts.id_ncc  ? [opts.id_ncc]  : []);
+    const nhomSet = Array.isArray(opts.id_nhom) ? opts.id_nhom.filter(Boolean)
+                  : (opts.id_nhom ? [opts.id_nhom] : []);
     let pool = await listData();
     pool = pool.filter(it => {
-      if (opts.id_ncc && C.GROUP_TO_NCC[it.ma_nhom] !== opts.id_ncc) return false;
-      if (opts.id_nhom && it.id_nhom !== opts.id_nhom) return false;
+      if (nccSet.length  && !nccSet.includes(C.GROUP_TO_NCC[it.ma_nhom])) return false;
+      if (nhomSet.length && !nhomSet.includes(it.id_nhom)) return false;
       if (opts.onlyDeHuHong && it.muc_do_hu_hong !== 'Dễ hư hỏng') return false;
       return it.don_gia > 0;
     });
+
     if (!pool.length) return { success: false, error: 'Không có vật tư phù hợp bộ lọc đã chọn.', purchase_orders: [] };
 
     // 2) Gom pool theo NCC (mỗi PO chỉ 1 NCC — Supplier Isolation)
@@ -588,13 +593,16 @@ Hãy chọn và sắp xếp tối đa 3 mã phù hợp nhất. CHỈ trả JSON 
       return r;
     }
     try {
+      const _ncc  = Array.isArray(params.opts?.id_ncc)  ? params.opts.id_ncc.filter(Boolean)  : (params.opts?.id_ncc  ? [params.opts.id_ncc]  : []);
+      const _nhom = Array.isArray(params.opts?.id_nhom) ? params.opts.id_nhom.filter(Boolean) : (params.opts?.id_nhom ? [params.opts.id_nhom] : []);
       const pool = (await listData())
-        .filter(it => (!params.opts?.id_ncc || C.GROUP_TO_NCC[it.ma_nhom] === params.opts.id_ncc)
-          && (!params.opts?.id_nhom || it.id_nhom === params.opts.id_nhom)
-          && it.don_gia > 0)
+        .filter(it => (!_ncc.length  || _ncc.includes(C.GROUP_TO_NCC[it.ma_nhom]))
+                   && (!_nhom.length || _nhom.includes(it.id_nhom))
+                   && it.don_gia > 0)
         .slice(0, 120)
         .map(it => ({ ma_hang: it.ma_hang, ten: it.ten_hang_hoa, dvt: it.dvt, gia: it.don_gia,
           ncc: C.GROUP_TO_NCC[it.ma_nhom], nhom: it.phan_loai_nhom_hang, id_nhom: it.id_nhom }));
+
       const payload = {
         task: 'Phân bổ ngân sách thành nhiều PO. Mỗi PO 1 NCC, giá trị trong [min,max], số lượng nguyên dương, tổng <= budget.',
         thang_nam: params.thang_nam, budget: params.budget,
@@ -680,9 +688,9 @@ Hãy chọn và sắp xếp tối đa 3 mã phù hợp nhất. CHỈ trả JSON 
     setSetting, getSetting, aiStatus, nvidiaOptimize,
     // backup
     exportBackup, importBackup,
-    // raw (cho import excel)
-    _bulkPut: bulkPut, _clear: clearStore, _store: S,
-        // auto-generator
+    // tiện ích nội bộ cho UI nâng cao (Debug 3 / import)
+    _del: del, _clear: clearStore, _bulkPut: bulkPut, _get: get, _getAll: getAll, _store: S, 
+    // auto-generator
     autoGeneratePOs, autoGeneratePOsAI,
     // CRUD NCC
     saveNCC, deleteNCC,

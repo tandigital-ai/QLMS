@@ -5,8 +5,8 @@ window.CONFIG = (function () {
 
   // ---- Ràng buộc giá trị đơn hàng (VNĐ) ----
   const ORDER_CONSTRAINTS = {
-    MIN_ORDER: 5_000_000,   // Dưới mức này -> cảnh báo & gợi ý bổ sung
-    MAX_ORDER: 50_000_000,  // Vượt mức này -> tự động tách PO
+    MIN_ORDER: 3_000_000,   // Dưới mức này -> cảnh báo & gợi ý bổ sung
+    MAX_ORDER: 4_500_000,  // Vượt mức này -> tự động tách PO
   };
 
   // ---- Ánh xạ Nhóm hàng -> Nhà cung cấp ----
@@ -26,12 +26,12 @@ window.CONFIG = (function () {
 
   // ---- Danh mục 6 Nhà cung cấp ----
   const NHA_CUNG_CAP = [
-    { id_ncc: 'NCC001', ten_ncc: 'Cơ Điện - Máy Móc Phương Nam', nhom_phu_trach: ['CDM'], dien_thoai: '0901 000 001', dia_chi: 'KCN Tân Bình, TP.HCM' },
-    { id_ncc: 'NCC002', ten_ncc: 'Điện - Chiếu Sáng Đại Quang', nhom_phu_trach: ['DCS'], dien_thoai: '0901 000 002', dia_chi: 'Q. Bình Thạnh, TP.HCM' },
-    { id_ncc: 'NCC003', ten_ncc: 'Đường Ống Cấp Thoát Nước Tiến Phát', nhom_phu_trach: ['CTN'], dien_thoai: '0901 000 003', dia_chi: 'Q.12, TP.HCM' },
-    { id_ncc: 'NCC004', ten_ncc: 'Phụ Tùng Xe - Cơ Khí Hồng Hà', nhom_phu_trach: ['PTX'], dien_thoai: '0901 000 004', dia_chi: 'Q. Tân Phú, TP.HCM' },
-    { id_ncc: 'NCC005', ten_ncc: 'Bảo Hộ Lao Động An Toàn Việt', nhom_phu_trach: ['BHL'], dien_thoai: '0901 000 005', dia_chi: 'Q. Gò Vấp, TP.HCM' },
-    { id_ncc: 'NCC006', ten_ncc: 'Vật Tư Tổng Hợp Minh Long', nhom_phu_trach: ['ATG','KHA','VTP','XDG'], dien_thoai: '0901 000 006', dia_chi: 'H. Bình Chánh, TP.HCM' },
+    { id_ncc: 'NCC001', ten_ncc: 'Cơ Điện - Máy Móc', nhom_phu_trach: ['CDM'], dien_thoai: '', dia_chi: 'TP.HCM' },
+    { id_ncc: 'NCC002', ten_ncc: 'Điện - Chiếu Sáng', nhom_phu_trach: ['DCS'], dien_thoai: '', dia_chi: 'TP.HCM' },
+    { id_ncc: 'NCC003', ten_ncc: 'Đường Ống Cấp Thoát Nước', nhom_phu_trach: ['CTN'], dien_thoai: '', dia_chi: 'TP.HCM' },
+    { id_ncc: 'NCC004', ten_ncc: 'Phụ Tùng Xe - Cơ Khí', nhom_phu_trach: ['PTX'], dien_thoai: '', dia_chi: 'TP.HCM' },
+    { id_ncc: 'NCC005', ten_ncc: 'Bảo Hộ Lao Động An', nhom_phu_trach: ['BHL'], dien_thoai: '', dia_chi: 'TP.HCM' },
+    { id_ncc: 'NCC006', ten_ncc: 'Vật Tư Tổng Hợp', nhom_phu_trach: ['ATG','KHA','VTP','XDG'], dien_thoai: '', dia_chi: 'TP.HCM' },
   ];
 
   // ---- 12 Nhóm hàng (DANH_MUC_NHOM) ----

@@ -243,3 +243,13 @@ textarea { min-height: 64px; resize: vertical; }
 .ncc-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .ncc-head .act { display: flex; gap: 4px; }
 input[type="range"] { padding: 0; }
+
+.chk-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:6px;max-height:160px;overflow:auto;border:1px solid var(--bd,#e2e8f0);border-radius:8px;padding:8px;margin-top:4px}
+.chk-pill{display:flex;align-items:center;gap:6px;font-size:13px;font-weight:400;cursor:pointer;padding:2px 4px;border-radius:6px}
+.chk-pill:hover{background:#f1f5f9}
+.chk-pill input{width:auto;margin:0}
+
+.cell-inp{width:100%;border:1px solid #e2e8f0;border-radius:6px;padding:3px 6px;font-size:13px}
+.cell-inp:focus{border-color:var(--pri,#3b82f6);outline:none}
+.po-edit-tbl td{padding:3px 4px;vertical-align:middle}
+.cell-amt{text-align:right;font-weight:600;white-space:nowrap}

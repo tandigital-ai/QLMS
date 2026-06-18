@@ -576,54 +576,46 @@
     AppState.poPreview = result;
 
     const nccMap = Object.fromEntries((await window.API.listNCC()).map(n => [n.id_ncc, n.ten_ncc]));
-    openModal({
-      wide: true,
-      title: '⚙️ Xem trước đơn hàng tự động (Auto-Split)',
-      body: `
-        ${result.warnings_general.length ? `<div class="alert alert-warn">${result.warnings_general.map(esc).join('<br>')}</div>` : ''}
-        <div class="po-preview">
-          ${result.purchase_orders.map((po, idx) => `
-            <div class="po-card">
-              <div class="po-head">
-                <div><b>${esc(po.ma_don_hang)}</b><br><small>${esc(po.id_ncc)} — ${esc(nccMap[po.id_ncc] || '')}</small></div>
-                <div class="po-val">${fmt(po.gia_tri_don_hang)}</div>
-              </div>
-              ${po.warnings.length ? `<div class="alert alert-warn sm">${po.warnings.map(esc).join('<br>')}</div>` : ''}
-              <table class="tbl sm"><thead><tr><th>Mã</th><th>Tên</th><th>SL</th><th>Đơn giá</th><th>Thành tiền</th></tr></thead>
-                <tbody>${po._lines.map(l => `<tr><td>${esc(l.ma_hang)}</td><td>${esc(l.ten_hang_hoa)}</td>
-                  <td>${l.so_luong}</td><td>${fmt(l.don_gia_thuc_te)}</td><td>${fmt(l.thanh_tien)}</td></tr>`).join('')}</tbody></table>
-            </div>`).join('')}
-        </div>
-        <div class="alert">Tổng phân bổ: <b>${fmt(result.budget_utilization.total_allocated)}</b> / Ngân sách: <b>${fmt(kh.tong_du_tru)}</b></div>`,
-      foot: [
-        { label: 'Quay lại', class: 'btn-light', onClick: () => openPickItems(kh.id_ke_hoach) },
-        { label: '✅ Xác nhận tạo ' + result.purchase_orders.length + ' đơn', class: 'btn-primary', onClick: () => commitPOs() },
-      ],
-    });
+    AppState.poPreview = result;
+    showAutoPreview(result, kh, kh.tong_du_tru - (AppState.cache.baseSpent || 0));
+
   }
 
-  // Ghi các PO + chi tiết vào IndexedDB
-  async function commitPOs() {
+  // Ghi các PO + chi tiết vào IndexedDB cập nhật commitPOs để chống tạo đơn rỗng / vượt ngân sách / dòng thiếu thông tin 
+    async function commitPOs() {
     const kh = AppState.planDraft;
     const result = AppState.poPreview;
+    if (!result || !result.purchase_orders.length) return toast('Không còn đơn nào để tạo', 'error');
+
+    // Validate sau chỉnh sửa (Debug 2)
+    for (const po of result.purchase_orders) {
+      po._lines = po._lines.filter(l => l.ten_hang_hoa && l.so_luong > 0); // bỏ dòng trống
+      po._lines.forEach(l => { l.thanh_tien = l.so_luong * l.don_gia_thuc_te; });
+      po.gia_tri_don_hang = po._lines.reduce((a, l) => a + l.thanh_tien, 0);
+      if (!po._lines.length) return toast(`Đơn ${po.ma_don_hang} không có dòng hợp lệ`, 'error', 5000);
+    }
+    const total = result.purchase_orders.reduce((a, p) => a + p.gia_tri_don_hang, 0);
+    const budget = (AppState.cache.previewBudget != null) ? AppState.cache.previewBudget
+                 : (kh.tong_du_tru - (AppState.cache.baseSpent || 0));
+    if (total > budget) return toast(`Tổng ${fmt(total)} vượt ngân sách còn lại ${fmt(budget)}`, 'error', 5000);
+
     for (const po of result.purchase_orders) {
       const poObj = {
         id_don_hang: po.id_don_hang, ma_don_hang: po.ma_don_hang,
         id_ke_hoach: kh.id_ke_hoach, id_ncc: po.id_ncc,
         gia_tri_don_hang: po.gia_tri_don_hang, trang_thai: C.PO_STATUS.NHAP,
-        ngay_gui: null, ghi_chu: po.warnings.join(' | '),
+        ngay_gui: null, ghi_chu: (po.warnings || []).join(' | '),
       };
       await window.API.saveDonHang(poObj);
       for (const l of po._lines) {
         await window.API.saveChiTiet({
-          id_don_hang: po.id_don_hang, ma_hang: l.ma_hang, ten_hang_hoa: l.ten_hang_hoa,
+          id_don_hang: po.id_don_hang, ma_hang: l.ma_hang || '(tùy chỉnh)', ten_hang_hoa: l.ten_hang_hoa,
           dvt: l.dvt || '', so_luong: l.so_luong,
           don_gia_de_xuat: l.don_gia_thuc_te, don_gia_thuc_te: l.don_gia_thuc_te,
           thanh_tien: l.thanh_tien, ghi_chu_dong: '',
         });
       }
     }
-    // cập nhật trạng thái kế hoạch -> Đang thực hiện
     if (kh.trang_thai_ke_hoach === C.PLAN_STATUS.NHAP || kh.trang_thai_ke_hoach === C.PLAN_STATUS.DA_DUYET) {
       kh.trang_thai_ke_hoach = C.PLAN_STATUS.DANG_THUC_HIEN;
       await window.API.saveKeHoach(kh);
@@ -633,6 +625,7 @@
     toast(`Đã tạo ${result.purchase_orders.length} đơn hàng`, 'success');
     navigate('donhang');
   }
+
   /* ====================================================================
    *  BẢN VÁ: giữ giỏ khi đóng lớp cảnh báo/thay thế
    *  Ghi đè closeAddModal để KHÔI PHỤC giỏ thay vì reset.
@@ -654,6 +647,7 @@
    *  MÀN HÌNH 4 — ĐƠN ĐẶT HÀNG (vòng đời PO)
    * ==================================================================== */
   async function renderDonHang() {
+    toolbarBtn('📊 Xuất Excel theo kỳ', 'btn-primary', () => openExportPeriod());
     const [dhs, khs, cts] = await Promise.all([
       window.API.listDonHang(), window.API.listKeHoach(), window.API.listCongTrinh(),
     ]);
@@ -692,16 +686,21 @@
             <td>${fmt(d.gia_tri_don_hang)}</td>
             <td>${statusBadge(d.trang_thai)}</td>
             <td>${esc((d.ngay_tao || '').slice(0, 16))}</td>
-            <td class="act">
+              <td class="act">
               <button class="ibtn ibtn-primary" data-view="${d.id_don_hang}" title="Chi tiết">👁️</button>
+              ${[C.PO_STATUS.NHAP, C.PO_STATUS.DA_GUI].includes(d.trang_thai)
+                ? `<button class="ibtn ibtn-warn" data-editpo="${d.id_don_hang}" title="Sửa đơn">✏️</button>` : ''}
               <button class="ibtn" data-pdf="${d.id_don_hang}" title="In PDF">🖨️</button>
-              <button class="ibtn" data-xls="${d.id_don_hang}" title="Xuất Excel">📊</button>
+              <button class="ibtn" data-xls="${d.id_don_hang}" title="Xuất Excel">📤</button>
               ${C.PO_NO_DELETE_FROM.includes(d.trang_thai) ? '' : `<button class="ibtn ibtn-danger" data-del="${d.id_don_hang}" title="Xóa">🗑️</button>`}
-            </td></tr>`;
+            </td>
+            </tr>`;
         }).join('')}</tbody></table>` : emptyBox('Không có đơn hàng phù hợp.'));
 
 
       $$('[data-view]', view()).forEach(b => b.onclick = () => openPoDetail(b.dataset.view));
+      
+      $$('[data-editpo]', view()).forEach(b => b.onclick = () => openPoEditor(b.dataset.editpo));
 
       $$('[data-pdf]', view()).forEach(b => b.onclick = () => printPO(b.dataset.pdf));
 
@@ -712,6 +711,224 @@
     $('#dhFilter').onchange = draw;
     $('#dhSearch').oninput = draw;
     draw();
+  }
+
+  /* ====================================================================
+   *  DEBUG 4 — XUẤT EXCEL THEO KỲ: chọn tháng -> mỗi NCC 1 sheet,
+   *  gộp tất cả đơn của NCC đó trong tháng vào CÙNG 1 sheet (không tách).
+   * ==================================================================== */
+  async function openExportPeriod() {
+    const dhs = (await window.API.listDonHang()).filter(d => d.trang_thai !== C.PO_STATUS.DA_HUY);
+    // tập các tháng có đơn (lấy theo mã PO: PO-YYYYMM-... -> YYYY-MM)
+    const months = [...new Set(dhs.map(d => {
+      const m = /PO-(\d{4})(\d{2})-/.exec(d.ma_don_hang); return m ? `${m[1]}-${m[2]}` : (d.ngay_tao||'').slice(0,7);
+    }).filter(Boolean))].sort().reverse();
+    if (!months.length) return toast('Chưa có đơn nào để xuất', 'error');
+
+    openModal({
+      title: '📊 Xuất Excel theo kỳ (gộp theo NCC)',
+      body: `<div class="form-grid">
+          <label class="col-2">Chọn kỳ (tháng) *
+            <select id="ep_month">${months.map(m => `<option>${m}</option>`).join('')}</select></label>
+        </div>
+        <div class="alert sm">Mỗi nhà cung cấp sẽ là 1 sheet, gộp toàn bộ đơn của NCC đó trong kỳ vào cùng một sheet (không tách đơn). File kẻ khung, vừa khổ A4.</div>`,
+      foot: [
+        { label: 'Hủy', class: 'btn-light', onClick: closeModal },
+        { label: '⬇️ Xuất file', class: 'btn-primary', onClick: () => runExportPeriod($('#ep_month').value) },
+      ],
+    });
+  }
+
+  async function runExportPeriod(month) {
+    const monthKey = month.replace('-', ''); // YYYYMM
+    const dhs = (await window.API.listDonHang()).filter(d => {
+      if (d.trang_thai === C.PO_STATUS.DA_HUY) return false;
+      const m = /PO-(\d{6})-/.exec(d.ma_don_hang);
+      const k = m ? m[1] : (d.ngay_tao||'').slice(0,7).replace('-','');
+      return k === monthKey;
+    });
+    if (!dhs.length) return toast('Kỳ này không có đơn hàng', 'error');
+
+    const nccList = await window.API.listNCC();
+    const nccMap = Object.fromEntries(nccList.map(n => [n.id_ncc, n]));
+    // gom đơn theo NCC
+    const byNcc = {};
+    for (const d of dhs) (byNcc[d.id_ncc] = byNcc[d.id_ncc] || []).push(d);
+
+    const wb = XLSX.utils.book_new();
+    for (const idNcc of Object.keys(byNcc).sort()) {
+      const orders = byNcc[idNcc].sort((a,b)=>a.ma_don_hang.localeCompare(b.ma_don_hang));
+      // nạp chi tiết
+      const detail = [];
+      let grand = 0;
+      for (const po of orders) {
+        const cts = await window.API.listChiTietByDon(po.id_don_hang);
+        detail.push({ po, cts });
+        grand += po.gia_tri_don_hang;
+      }
+      const ws = buildNccPeriodSheet(month, nccMap[idNcc] || { id_ncc:idNcc, ten_ncc:idNcc }, detail, grand);
+      setA4(ws);
+      XLSX.utils.book_append_sheet(wb, ws, idNcc); // tên sheet = mã NCC
+    }
+    XLSX.writeFile(wb, `DonHang_${month}_TheoNCC.xlsx`);
+    toast(`Đã xuất ${Object.keys(byNcc).length} NCC trong kỳ ${month}`, 'success');
+  }
+
+  // 1 sheet = 1 NCC, gộp nhiều đơn liên tiếp (mỗi đơn 1 block, chung 1 sheet)
+  function buildNccPeriodSheet(month, ncc, detail, grand) {
+    const NC = 8; // STT,Mã đơn,Mã hàng,Tên,ĐVT,SL,Đơn giá,Thành tiền
+    const aoa = [];
+    aoa.push([`BẢNG TỔNG HỢP ĐƠN ĐẶT HÀNG — KỲ ${month}`, '', '', '', '', '', '', '']);
+    aoa.push([`Nhà cung cấp: ${ncc.id_ncc} - ${ncc.ten_ncc}`, '', '', '', '', '', '', '']);
+    aoa.push([`Số đơn trong kỳ: ${detail.length}`, '', '', '', '', '', '', '']);
+    const headRow = 3;
+    aoa.push(['STT', 'Mã đơn', 'Mã hàng', 'Tên hàng hóa', 'ĐVT', 'SL', 'Đơn giá', 'Thành tiền']);
+
+    const merges = [
+      { s:{r:0,c:0}, e:{r:0,c:NC-1} },
+      { s:{r:1,c:0}, e:{r:1,c:NC-1} },
+      { s:{r:2,c:0}, e:{r:2,c:NC-1} },
+    ];
+    const subtotalRows = [];
+    let stt = 1;
+    detail.forEach(({ po, cts }) => {
+      cts.forEach(c => aoa.push([stt++, po.ma_don_hang, c.ma_hang, c.ten_hang_hoa, c.dvt, c.so_luong, c.don_gia_thuc_te, c.thanh_tien]));
+      // dòng cộng phụ theo đơn
+      aoa.push(['', '', '', '', '', '', `Cộng đơn ${po.ma_don_hang}`, po.gia_tri_don_hang]);
+      subtotalRows.push(aoa.length - 1);
+    });
+    aoa.push(['', '', '', '', '', '', 'TỔNG CỘNG TOÀN KỲ', grand]);
+    const totalRow = aoa.length - 1;
+
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws['!cols'] = [{wch:5},{wch:20},{wch:12},{wch:36},{wch:7},{wch:7},{wch:13},{wch:15}];
+    // merge các ô nhãn "Cộng đơn" (cột 6) — giữ đơn giản, chỉ style
+    ws['!merges'] = merges;
+
+    // Style
+    styleRange(ws, 0, 0, 0, NC-1, () => XL.title());
+    styleRange(ws, 1, 2, 0, NC-1, () => XL.sub());
+    styleRange(ws, headRow, headRow, 0, NC-1, () => XL.head());
+    // vùng dữ liệu: từ headRow+1 đến totalRow
+    for (let r = headRow + 1; r <= totalRow; r++) {
+      const isSub = subtotalRows.includes(r);
+      const isTotal = r === totalRow;
+      for (let c = 0; c < NC; c++) {
+        const addr = XLSX.utils.encode_cell({ r, c });
+        if (!ws[addr]) ws[addr] = { t: 's', v: '' };
+        if (isTotal) ws[addr].s = (c >= 6) ? XL.total() : XL.cell('left');
+        else if (isSub) ws[addr].s = (c === 7) ? XL.money() : (c === 6 ? { font:{bold:true,italic:true,sz:10}, alignment:{horizontal:'right'}, border: XL.border() } : XL.cell('left'));
+        else ws[addr].s = (c===0||c===4||c===5) ? XL.cell('center') : (c===6||c===7) ? XL.money() : XL.cell('left');
+      }
+    }
+    ws['!ref'] = XLSX.utils.encode_range({ s:{r:0,c:0}, e:{r:totalRow,c:NC-1} });
+    return ws;
+  }
+
+    /* ====================================================================
+   *  DEBUG 3 — SỬA ĐƠN HÀNG (chỉ khi Nháp / Đã gửi đơn)
+   *  Cùng cơ chế editor với Debug 2: thêm/xóa dòng, sửa SL/đơn giá/tên.
+   * ==================================================================== */
+  async function openPoEditor(id) {
+    const po = await window.API.getDonHang(id);
+    if (![C.PO_STATUS.NHAP, C.PO_STATUS.DA_GUI].includes(po.trang_thai))
+      return toast('Chỉ sửa được đơn ở trạng thái Nháp / Đã gửi đơn', 'error');
+    const cts = await window.API.listChiTietByDon(id);
+    AppState.cache.allData = AppState.cache.allData || await window.API.listData();
+    AppState.cache.poEdit = {
+      id_don_hang: id, ma_don_hang: po.ma_don_hang, id_ncc: po.id_ncc,
+      origCt: cts,   // để biết dòng nào cần xóa khi lưu
+      lines: cts.map(c => ({
+        id_chi_tiet: c.id_chi_tiet, ma_hang: c.ma_hang, ten_hang_hoa: c.ten_hang_hoa,
+        dvt: c.dvt, so_luong: c.so_luong, don_gia_thuc_te: c.don_gia_thuc_te,
+        thanh_tien: c.thanh_tien,
+      })),
+    };
+
+    openModal({
+      wide: true,
+      title: '✏️ Sửa đơn — ' + po.ma_don_hang,
+      body: `<div class="po-card"><div id="poEditOne"></div>
+        <button class="btn btn-sm btn-light" id="poEditAdd">➕ Thêm dòng</button></div>
+        <div class="alert" id="poEditOneSum"></div>`,
+      foot: [
+        { label: 'Hủy', class: 'btn-light', onClick: closeModal },
+        { label: '💾 Lưu thay đổi', class: 'btn-primary', onClick: () => savePoEditor() },
+      ],
+    });
+    renderPoEditorOne();
+  }
+
+  function renderPoEditorOne() {
+    const E = AppState.cache.poEdit;
+    E.lines.forEach(l => l.thanh_tien = (l.so_luong || 0) * (l.don_gia_thuc_te || 0));
+    const total = E.lines.reduce((a, l) => a + l.thanh_tien, 0);
+
+    $('#poEditOne').innerHTML = `
+      <table class="tbl sm po-edit-tbl">
+        <thead><tr><th style="width:120px">Mã</th><th>Tên mặt hàng</th><th style="width:70px">ĐVT</th>
+          <th style="width:80px">SL</th><th style="width:120px">Đơn giá</th><th style="width:120px">Thành tiền</th><th style="width:40px"></th></tr></thead>
+        <tbody>${E.lines.map((l, i) => `
+          <tr>
+            <td><input class="cell-inp" list="dlMaHangPo" value="${esc(l.ma_hang || '')}" data-f="ma" data-i="${i}"></td>
+            <td><input class="cell-inp" value="${esc(l.ten_hang_hoa || '')}" data-f="ten" data-i="${i}"></td>
+            <td><input class="cell-inp" value="${esc(l.dvt || '')}" data-f="dvt" data-i="${i}"></td>
+            <td><input class="cell-inp" type="number" min="1" value="${l.so_luong}" data-f="sl" data-i="${i}"></td>
+            <td><input class="cell-inp" type="number" min="0" value="${l.don_gia_thuc_te}" data-f="dg" data-i="${i}"></td>
+            <td class="cell-amt">${fmt(l.thanh_tien)}</td>
+            <td><button class="ibtn ibtn-danger" data-rm="${i}" title="Xóa dòng">✕</button></td>
+          </tr>`).join('')}</tbody>
+      </table>
+      <datalist id="dlMaHangPo">${(AppState.cache.allData || []).slice(0,1000)
+        .map(d => `<option value="${esc(d.ma_hang)}">${esc(d.ten_hang_hoa)}</option>`).join('')}</datalist>`;
+    $('#poEditOneSum').innerHTML = `Giá trị đơn sau sửa: <b>${fmt(total)}</b>`;
+
+
+    $$('[data-f]', $('#poEditOne')).forEach(inp => inp.onchange = () => {
+      const i = +inp.dataset.i, f = inp.dataset.f, line = E.lines[i];
+      if (f === 'sl') line.so_luong = Math.max(1, Math.round(+inp.value || 1));
+      else if (f === 'dg') line.don_gia_thuc_te = Math.max(0, +inp.value || 0);
+      else if (f === 'dvt') line.dvt = inp.value.trim();
+      else if (f === 'ten') line.ten_hang_hoa = inp.value.trim();
+      else if (f === 'ma') {
+        line.ma_hang = inp.value.trim();
+        const d = (AppState.cache.allData || []).find(x => x.ma_hang === line.ma_hang);
+        if (d) { line.ten_hang_hoa = d.ten_hang_hoa; line.dvt = d.dvt; line.don_gia_thuc_te = d.don_gia; }
+      }
+      renderPoEditorOne();
+    });
+
+    $$('[data-rm]', $('#poEditOne')).forEach(b => b.onclick = () => { E.lines.splice(+b.dataset.rm, 1); renderPoEditorOne(); });
+    $('#poEditAdd').onclick = () => { E.lines.push({ ma_hang:'', ten_hang_hoa:'', dvt:'', so_luong:1, don_gia_thuc_te:0, thanh_tien:0 }); renderPoEditorOne(); };
+  }
+
+  async function savePoEditor() {
+    const E = AppState.cache.poEdit;
+    const lines = E.lines.filter(l => l.ten_hang_hoa && l.so_luong > 0);
+    if (!lines.length) return toast('Đơn phải có ít nhất 1 dòng hợp lệ', 'error');
+    lines.forEach(l => l.thanh_tien = l.so_luong * l.don_gia_thuc_te);
+    const giaTri = lines.reduce((a, l) => a + l.thanh_tien, 0);
+
+    // 1) Xóa các CHI_TIET cũ không còn (so theo id_chi_tiet)
+    const keepIds = new Set(lines.filter(l => l.id_chi_tiet).map(l => l.id_chi_tiet));
+    for (const c of E.origCt) if (!keepIds.has(c.id_chi_tiet)) await window.API._del(window.API._store.CHI_TIET, c.id_chi_tiet);
+
+    // 2) Lưu (update / thêm mới) các dòng hiện tại
+    for (const l of lines) {
+      await window.API.saveChiTiet({
+        id_chi_tiet: l.id_chi_tiet, id_don_hang: E.id_don_hang,
+        ma_hang: l.ma_hang || '(tùy chỉnh)', ten_hang_hoa: l.ten_hang_hoa,
+        dvt: l.dvt || '', so_luong: l.so_luong,
+        don_gia_de_xuat: l.don_gia_thuc_te, don_gia_thuc_te: l.don_gia_thuc_te,
+        thanh_tien: l.thanh_tien, ghi_chu_dong: '',
+      });
+    }
+    // 3) Cập nhật giá trị đơn
+    const po = await window.API.getDonHang(E.id_don_hang);
+    po.gia_tri_don_hang = giaTri;
+    await window.API.saveDonHang(po);
+
+    closeModal(); toast('Đã lưu thay đổi đơn hàng', 'success'); renderDonHang();
   }
 
   function confirmDelPO(id) {
@@ -817,23 +1034,82 @@
     setTimeout(() => document.body.classList.remove('printing'), 500);
   }
 
-  /* -------------------- XUẤT EXCEL 1 ĐƠN (SheetJS) -------------------- */
+  /* -------------------- XUẤT EXCEL 1 ĐƠN — kẻ khung, vừa A4 (Debug 4) -------------------- */
   async function exportPoExcel(id) {
     const po = await window.API.getDonHang(id);
     const cts = await window.API.listChiTietByDon(id);
-    const aoa = [
-      ['ĐƠN ĐẶT HÀNG', '', '', '', '', '', ''],
-      ['Mã đơn:', po.ma_don_hang, '', 'NCC:', po.id_ncc, '', ''],
-      C.EXCEL_COLS.PO_DETAIL,
-      ...cts.map((c, i) => [i + 1, c.ma_hang, c.ten_hang_hoa, c.dvt, c.so_luong, c.don_gia_thuc_te, c.thanh_tien, c.ghi_chu_dong || '']),
-      ['', '', '', '', '', 'TỔNG', po.gia_tri_don_hang, ''],
-    ];
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws['!cols'] = [{ wch: 5 }, { wch: 14 }, { wch: 38 }, { wch: 8 }, { wch: 8 }, { wch: 14 }, { wch: 16 }, { wch: 20 }];
+    const ncc = (await window.API.listNCC()).find(n => n.id_ncc === po.id_ncc) || {};
+    const kh = po.id_ke_hoach ? await window.API.getKeHoach(po.id_ke_hoach) : null;
+    const ct = kh ? await window.API.getCongTrinh(kh.id_cong_trinh) : null;
+
     const wb = XLSX.utils.book_new();
+    const ws = buildPoSheet(po, cts, ncc, ct, kh, 0);
+    setA4(ws);
     XLSX.utils.book_append_sheet(wb, ws, 'DonHang');
     XLSX.writeFile(wb, `${po.ma_don_hang}.xlsx`);
-    toast('Đã xuất Excel', 'success');
+    toast('Đã xuất Excel (kẻ khung, vừa A4)', 'success');
+  }
+
+  // Dựng 1 sheet đơn hàng theo bố cục PDF. startRow = dòng bắt đầu (cho phép nối nhiều đơn 1 sheet)
+  // Trả về { ws, nextRow } khi gọi cho gộp; khi gọi lẻ trả về ws.
+  function buildPoSheet(po, cts, ncc, ct, kh, startRow) {
+    const NC = 7; // 7 cột: STT,Mã,Tên,ĐVT,SL,Đơn giá,Thành tiền
+    const aoa = [];
+    aoa.push(['ĐƠN ĐẶT HÀNG', '', '', '', '', '', '']);
+    aoa.push([`Số: ${po.ma_don_hang}    Ngày: ${(po.ngay_tao||'').slice(0,10)}`, '', '', '', '', '', '']);
+    aoa.push([`Nhà cung cấp: ${ncc.ten_ncc || po.id_ncc}`, '', '', '', `Công trình: ${ct ? ct.ten_cong_trinh : ''}`, '', '']);
+    aoa.push([`Điện thoại: ${ncc.dien_thoai || ''}`, '', '', '', `Kế hoạch tháng: ${kh ? kh.thang_nam : ''}`, '', '']);
+    aoa.push(['STT', 'Mã hàng', 'Tên hàng hóa', 'ĐVT', 'SL', 'Đơn giá', 'Thành tiền']);
+    cts.forEach((c, i) => aoa.push([i+1, c.ma_hang, c.ten_hang_hoa, c.dvt, c.so_luong, c.don_gia_thuc_te, c.thanh_tien]));
+    aoa.push(['', '', '', '', '', 'TỔNG CỘNG', po.gia_tri_don_hang]);
+
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws['!cols'] = [{wch:5},{wch:14},{wch:40},{wch:8},{wch:8},{wch:14},{wch:16}];
+    // merge tiêu đề & dòng phụ
+    ws['!merges'] = [
+      { s:{r:0,c:0}, e:{r:0,c:NC-1} },
+      { s:{r:1,c:0}, e:{r:1,c:NC-1} },
+      { s:{r:2,c:0}, e:{r:2,c:3} }, { s:{r:2,c:4}, e:{r:2,c:NC-1} },
+      { s:{r:3,c:0}, e:{r:3,c:3} }, { s:{r:3,c:4}, e:{r:3,c:NC-1} },
+    ];
+    const headRow = 4, firstData = 5, lastData = 4 + cts.length, totalRow = lastData + 1;
+    // style
+    styleRange(ws, 0, 0, 0, NC-1, () => XL.title());
+    styleRange(ws, 1, 1, 0, NC-1, () => XL.sub());
+    styleRange(ws, headRow, headRow, 0, NC-1, () => XL.head());
+    styleRange(ws, firstData, lastData, 0, NC-1, (r,c) =>
+      c===0 ? XL.cell('center') : c===2 ? XL.cell('left') : (c>=4 ? (c===4?XL.cell('center'):XL.money()) : XL.cell('center')));
+    styleRange(ws, totalRow, totalRow, 0, NC-1, () => XL.total());
+    ws['!ref'] = XLSX.utils.encode_range({ s:{r:0,c:0}, e:{r:totalRow,c:NC-1} });
+    return ws;
+  }
+
+    /* ====================================================================
+   *  DEBUG 4 — STYLE EXCEL (xlsx-js-style): kẻ khung, canh lề, vừa A4
+   * ==================================================================== */
+  const XL = {
+    thin: { style: 'thin', color: { rgb: '000000' } },
+    border() { return { top: this.thin, bottom: this.thin, left: this.thin, right: this.thin }; },
+    title()  { return { font: { bold: true, sz: 15 }, alignment: { horizontal: 'center', vertical: 'center' } }; },
+    sub()    { return { font: { italic: true, sz: 10 }, alignment: { horizontal: 'center' } }; },
+    head()   { return { font: { bold: true, sz: 11, color: { rgb: 'FFFFFF' } }, fill: { fgColor: { rgb: '2563EB' } },
+                        alignment: { horizontal: 'center', vertical: 'center', wrapText: true }, border: this.border() }; },
+    cell(al) { return { font: { sz: 10 }, alignment: { horizontal: al || 'left', vertical: 'center', wrapText: true }, border: this.border() }; },
+    money()  { return { font: { sz: 10 }, alignment: { horizontal: 'right', vertical: 'center' }, border: this.border(), numFmt: '#,##0' }; },
+    total()  { return { font: { bold: true, sz: 11 }, fill: { fgColor: { rgb: 'FEF3C7' } }, alignment: { horizontal: 'right' }, border: this.border(), numFmt: '#,##0' }; },
+  };
+  // Áp style cho mọi ô trong vùng [r0..r1]x[c0..c1] theo callback (r,c)->style
+  function styleRange(ws, r0, r1, c0, c1, styler) {
+    for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+      const addr = XLSX.utils.encode_cell({ r, c });
+      if (!ws[addr]) ws[addr] = { t: 's', v: '' };
+      ws[addr].s = styler(r, c);
+    }
+  }
+  // Cấu hình in vừa khổ A4 dọc (fit 1 trang ngang)
+  function setA4(ws) {
+    ws['!pageSetup'] = { orientation: 'portrait', paperSize: 9, scale: 0, fitToWidth: 1, fitToHeight: 0 };
+    ws['!margins'] = { left: 0.4, right: 0.4, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 };
   }
 
   /* ====================================================================
@@ -950,6 +1226,10 @@
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     ws['!cols'] = header.map(() => ({ wch: 16 }));
     const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'DanhMuc');
+    const rng = XLSX.utils.decode_range(ws['!ref']);
+    styleRange(ws, 0, 0, 0, rng.e.c, () => XL.head());
+    styleRange(ws, 1, rng.e.r, 0, rng.e.c, (r,c)=> [4].includes(c) ? XL.money() : XL.cell('left'));
+    setA4(ws);
     XLSX.writeFile(wb, 'DanhMuc_VatTu.xlsx'); toast('Đã xuất Excel danh mục', 'success');
   }
 
@@ -1047,6 +1327,10 @@
       ...Object.entries(r.ctAgg).map(([id, a], i) => { const c = r.ctMap[id]; const pct = a.budget ? (a.spent / a.budget * 100).toFixed(0) + '%' : '0%';
         return [i + 1, c ? c.ma_cong_trinh : id, c ? c.ten_cong_trinh : '', a.plans, a.budget, a.spent, a.budget - a.spent, pct]; })]);
     XLSX.utils.book_append_sheet(wb, wsCt, 'TheoCongTrinh');
+    const rng = XLSX.utils.decode_range(ws['!ref']);
+    styleRange(ws, 0, 0, 0, rng.e.c, () => XL.head());
+    styleRange(ws, 1, rng.e.r, 0, rng.e.c, (r,c)=> [4].includes(c) ? XL.money() : XL.cell('left'));
+    setA4(ws);
     XLSX.writeFile(wb, 'BaoCao_MuaSam.xlsx'); toast('Đã xuất báo cáo Excel', 'success');
   }
 
@@ -1165,10 +1449,16 @@
           </label>
           <label>Giá trị tối thiểu / đơn (₫)<input id="ag_min" type="number" value="${C.ORDER_CONSTRAINTS.MIN_ORDER}"></label>
           <label>Giá trị tối đa / đơn (₫)<input id="ag_max" type="number" value="${C.ORDER_CONSTRAINTS.MAX_ORDER}"></label>
-          <label>Giới hạn NCC (tùy chọn)
-            <select id="ag_ncc"><option value="">— Tất cả NCC —</option>${nccs.map(n => `<option value="${n.id_ncc}">${esc(n.id_ncc)} - ${esc(n.ten_ncc)}</option>`).join('')}</select></label>
-          <label>Giới hạn nhóm (tùy chọn)
-            <select id="ag_nhom"><option value="">— Tất cả nhóm —</option>${nhoms.map(n => `<option value="${n.id_nhom}">${esc(n.ten_nhom)}</option>`).join('')}</select></label>
+          <label class="col-2">Giới hạn NCC (tick chọn nhiều — bỏ trống = tất cả)
+            <div class="chk-grid" id="ag_ncc">
+              ${nccs.map(n => `<label class="chk-pill"><input type="checkbox" value="${n.id_ncc}"> ${esc(n.id_ncc)} - ${esc(n.ten_ncc)}</label>`).join('')}
+            </div>
+          </label>
+          <label class="col-2">Giới hạn nhóm (tick chọn nhiều — bỏ trống = tất cả)
+            <div class="chk-grid" id="ag_nhom">
+              ${nhoms.map(n => `<label class="chk-pill"><input type="checkbox" value="${n.id_nhom}"> ${esc(n.ten_nhom)}</label>`).join('')}
+            </div>
+          </label>
           <label class="col-2"><input type="checkbox" id="ag_dehu" style="width:auto"> Chỉ chọn vật tư "Dễ hư hỏng"</label>
           <label class="col-2">Mức lấp đầy mỗi đơn: <b id="ag_fr_lbl">92%</b>
             <input type="range" id="ag_fr" min="60" max="100" value="92" oninput="document.getElementById('ag_fr_lbl').textContent=this.value+'%'"></label>
@@ -1194,11 +1484,12 @@
     const budget = kh.tong_du_tru - used;
     if (budget < minOrder) return toast(`Ngân sách còn lại ${fmt(budget)} không đủ tạo đơn`, 'error', 5000);
 
+    const pickChk = (sel) => $$(`#${sel} input:checked`, $('#modalBody')).map(i => i.value);
     const params = {
       thang_nam: kh.thang_nam, budget, minOrder, maxOrder,
       opts: {
-        id_ncc: $('#ag_ncc').value || null,
-        id_nhom: $('#ag_nhom').value || null,
+        id_ncc:  pickChk('ag_ncc'),     // mảng [] (Debug 1)
+        id_nhom: pickChk('ag_nhom'),    // mảng [] (Debug 1)
         onlyDeHuHong: $('#ag_dehu').checked,
         fillRatio: Number($('#ag_fr').value) / 100,
       },
@@ -1219,30 +1510,139 @@
     showAutoPreview(result, kh, budget);
   }
 
+    /* ====================================================================
+   *  DEBUG 2 — PREVIEW EDITOR (chỉnh sửa nhanh trước khi tạo đơn)
+   *  Dùng chung cho cả Auto-Split (runPoEngine) và Auto-Generate.
+   * ==================================================================== */
   async function showAutoPreview(result, kh, budget) {
+    AppState.poPreview = result;
+    AppState.cache.allData = AppState.cache.allData || await window.API.listData();
     const nccMap = Object.fromEntries((await window.API.listNCC()).map(n => [n.id_ncc, n.ten_ncc]));
+    AppState.cache.nccMap = nccMap;
+    AppState.cache.previewBudget = budget;
+
     openModal({
       wide: true,
-      title: `⚡ Xem trước ${result.purchase_orders.length} đơn tự động`,
+      title: `⚡ Xem trước & chỉnh sửa ${result.purchase_orders.length} đơn`,
       body: `
         ${result.warnings_general.length ? `<div class="alert alert-warn">${result.warnings_general.map(esc).join('<br>')}</div>` : ''}
-        <div class="po-preview">
-          ${result.purchase_orders.map(po => `
-            <div class="po-card">
-              <div class="po-head"><div><b>${esc(po.ma_don_hang)}</b><br><small>${esc(po.id_ncc)} — ${esc(nccMap[po.id_ncc] || '')}</small></div>
-                <div class="po-val">${fmt(po.gia_tri_don_hang)}</div></div>
-              ${po.warnings.length ? `<div class="alert alert-warn sm">${po.warnings.map(esc).join('<br>')}</div>` : ''}
-              <table class="tbl sm"><thead><tr><th>Mã</th><th>Tên</th><th>SL</th><th>Đơn giá</th><th>Thành tiền</th></tr></thead>
-                <tbody>${po._lines.map(l => `<tr><td>${esc(l.ma_hang)}</td><td>${esc(l.ten_hang_hoa)}</td><td>${l.so_luong}</td><td>${fmt(l.don_gia_thuc_te)}</td><td>${fmt(l.thanh_tien)}</td></tr>`).join('')}</tbody></table>
-            </div>`).join('')}
-        </div>
-        <div class="alert">Tổng phân bổ: <b>${fmt(result.budget_utilization.total_allocated)}</b> / Ngân sách còn lại: <b>${fmt(budget)}</b></div>`,
+        <div class="po-preview" id="poEditWrap"></div>
+        <div class="alert" id="poEditSum"></div>`,
       foot: [
         { label: 'Hủy', class: 'btn-light', onClick: () => { AppState.poPreview = null; closeModal(); } },
         { label: '🔄 Sinh lại', class: 'btn-light', onClick: openAutoGenerate },
-        { label: `✅ Xác nhận tạo ${result.purchase_orders.length} đơn`, class: 'btn-primary', onClick: () => commitPOs() },
+        { label: `✅ Xác nhận tạo đơn`, class: 'btn-primary', onClick: () => commitPOs() },
       ],
     });
+    renderPreviewEditor();
+  }
+
+  // Render lại toàn bộ editor preview từ AppState.poPreview
+  function renderPreviewEditor() {
+    const wrap = $('#poEditWrap'); if (!wrap) return;
+    const result = AppState.poPreview;
+    const nccMap = AppState.cache.nccMap || {};
+
+    wrap.innerHTML = result.purchase_orders.map((po, pi) => {
+      // tính lại giá trị đơn
+      po._lines.forEach(l => l.thanh_tien = (l.so_luong || 0) * (l.don_gia_thuc_te || 0));
+      po.gia_tri_don_hang = po._lines.reduce((a, l) => a + l.thanh_tien, 0);
+      return `
+      <div class="po-card">
+        <div class="po-head">
+          <div><b>${esc(po.ma_don_hang)}</b><br><small>${esc(po.id_ncc)} — ${esc(nccMap[po.id_ncc] || '')}</small></div>
+          <div class="po-val" data-poval="${pi}">${fmt(po.gia_tri_don_hang)}</div>
+        </div>
+        <table class="tbl sm po-edit-tbl">
+          <thead><tr><th style="width:120px">Mã</th><th>Tên mặt hàng</th><th style="width:70px">ĐVT</th>
+            <th style="width:80px">SL</th><th style="width:120px">Đơn giá</th><th style="width:120px">Thành tiền</th><th style="width:40px"></th></tr></thead>
+          <tbody>
+          ${po._lines.map((l, li) => `
+            <tr>
+              <td><input class="cell-inp" list="dlMaHang" value="${esc(l.ma_hang || '')}" data-edit="ma" data-pi="${pi}" data-li="${li}" placeholder="Mã / nhập tên"></td>
+              <td><input class="cell-inp" value="${esc(l.ten_hang_hoa || '')}" data-edit="ten" data-pi="${pi}" data-li="${li}" placeholder="Tên mặt hàng"></td>
+              <td><input class="cell-inp" value="${esc(l.dvt || '')}" data-edit="dvt" data-pi="${pi}" data-li="${li}"></td>
+              <td><input class="cell-inp" type="number" min="1" step="1" value="${l.so_luong}" data-edit="sl" data-pi="${pi}" data-li="${li}"></td>
+              <td><input class="cell-inp" type="number" min="0" value="${l.don_gia_thuc_te}" data-edit="dg" data-pi="${pi}" data-li="${li}"></td>
+              <td class="cell-amt">${fmt(l.thanh_tien)}</td>
+              <td><button class="ibtn ibtn-danger" data-rmline data-pi="${pi}" data-li="${li}" title="Xóa dòng">✕</button></td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+        <button class="btn btn-sm btn-light" data-addline data-pi="${pi}">➕ Thêm dòng</button>
+      </div>`;
+    }).join('') +
+    // datalist gợi ý mã hàng để auto-điền tên/đvt/giá
+    `<datalist id="dlMaHang">${(AppState.cache.allData || []).slice(0, 1000)
+        .map(d => `<option value="${esc(d.ma_hang)}">${esc(d.ten_hang_hoa)}</option>`).join('')}</datalist>`;
+
+    bindPreviewEvents();
+    refreshPreviewSum();
+  }
+
+  function bindPreviewEvents() {
+    const result = AppState.poPreview;
+
+    // Sửa ô (ma/ten/dvt/sl/dg)
+
+    $$('[data-edit]', $('#poEditWrap')).forEach(inp => {
+      inp.onchange = () => {
+        const pi = +inp.dataset.pi, li = +inp.dataset.li, field = inp.dataset.edit;
+        const line = result.purchase_orders[pi]._lines[li];
+        if (field === 'sl')  line.so_luong = Math.max(1, Math.round(+inp.value || 1));
+        else if (field === 'dg') line.don_gia_thuc_te = Math.max(0, +inp.value || 0);
+        else if (field === 'dvt') line.dvt = inp.value.trim();
+        else if (field === 'ten') line.ten_hang_hoa = inp.value.trim();
+        else if (field === 'ma') {
+          line.ma_hang = inp.value.trim();
+          // Nếu trùng mã trong DATA -> tự điền tên/đvt/đơn giá/nhóm (tùy chọn thay mặt hàng mới)
+          const d = (AppState.cache.allData || []).find(x => x.ma_hang === line.ma_hang);
+          if (d) {
+            line.ten_hang_hoa = d.ten_hang_hoa; line.dvt = d.dvt;
+            line.don_gia_thuc_te = d.don_gia;
+            line.id_nhom = d.id_nhom; line.ma_nhom = d.ma_nhom; line.phan_loai_nhom_hang = d.phan_loai_nhom_hang;
+          }
+        }
+        renderPreviewEditor(); // vẽ lại để cập nhật tên/giá/thành tiền
+      };
+    });
+
+    // Xóa dòng
+
+    $$('[data-rmline]', $('#poEditWrap')).forEach(b => b.onclick = () => {
+      const pi = +b.dataset.pi, li = +b.dataset.li;
+      result.purchase_orders[pi]._lines.splice(li, 1);
+      // nếu đơn rỗng -> xóa luôn đơn
+      if (!result.purchase_orders[pi]._lines.length) result.purchase_orders.splice(pi, 1);
+      if (!result.purchase_orders.length) { toast('Đã xóa hết — không còn đơn nào', 'info'); }
+      renderPreviewEditor();
+    });
+
+    // Thêm dòng trống (người dùng nhập tên / mã để thay mặt hàng mới)
+
+    $$('[data-addline]', $('#poEditWrap')).forEach(b => b.onclick = () => {
+      const pi = +b.dataset.pi;
+      result.purchase_orders[pi]._lines.push({
+        ma_hang: '', ten_hang_hoa: '', dvt: '', id_nhom: '', ma_nhom: '', phan_loai_nhom_hang: '',
+        so_luong: 1, don_gia_thuc_te: 0, thanh_tien: 0,
+      });
+      renderPreviewEditor();
+    });
+  }
+
+  function refreshPreviewSum() {
+    const result = AppState.poPreview;
+    const total = result.purchase_orders.reduce((a, p) => a + (p.gia_tri_don_hang || 0), 0);
+    result.budget_utilization = result.budget_utilization || {};
+    result.budget_utilization.total_allocated = total;
+    const budget = AppState.cache.previewBudget;
+    const sum = $('#poEditSum');
+    if (sum) {
+      const over = (budget != null) && total > budget;
+      sum.innerHTML = `Tổng phân bổ: <b class="${over ? 'txt-danger' : ''}">${fmt(total)}</b>`
+        + (budget != null ? ` / Ngân sách còn lại: <b>${fmt(budget)}</b>` : '')
+        + (over ? ' — <b class="txt-danger">VƯỢT NGÂN SÁCH</b>' : '');
+    }
   }
 
   /* ====================================================================
