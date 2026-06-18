@@ -1366,7 +1366,7 @@
     $('#btnSaveKeys').onclick = async () => {
       await window.API.setSetting('gemini_key', $('#set_gemini').value.trim());
       await window.API.setSetting('nvidia_key', $('#set_nvidia').value.trim());
-      const s = await window.API.aiStatus(); $('#aiStatusPill').textContent = 'AI: ' + s.mode;
+      const s = await window.API.aiStatus(); $('#aiStatusPill').textContent = 'TanDigitalAI: ' + s.mode;
       toast('Đã lưu khóa AI', 'success');
     };
     $('#btnBackup').onclick = async () => {
@@ -1688,7 +1688,7 @@
       await window.API.openDB();
       const seeded = await window.API.seedIfEmpty();
       const ai = await window.API.aiStatus();
-      $('#aiStatusPill').textContent = 'AI: ' + ai.mode;
+      $('#aiStatusPill').textContent = 'TandigitalAI: ' + ai.mode;
       if (seeded) toast('Đã khởi tạo 300 mặt hàng mẫu', 'success');
       await navigate('dashboard');
     } catch (e) {
