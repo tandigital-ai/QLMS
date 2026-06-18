@@ -232,6 +232,48 @@ window.API = (function () {
     return (b.getFullYear() - a.getFullYear()) * 12 + (b.getMonth() - a.getMonth()) + (b.getDate() - a.getDate()) / 30;
   }
 
+    // Số tháng giữa 2 chuỗi "YYYY-MM" (vd "2026-04" -> "2026-06" = 2)
+  function monthsBetweenYM(ym1, ym2) {
+    const [y1, m1] = ym1.split('-').map(Number);
+    const [y2, m2] = ym2.split('-').map(Number);
+    return (y2 - y1) * 12 + (m2 - m1);
+  }
+
+  // Lấy Set các ma_hang ĐÃ có đơn (không-hủy) trong tháng thang_nam ("YYYY-MM")
+  async function getMaHangPurchasedInMonth(thang_nam) {
+    const key = thang_nam.replace('-', ''); // YYYYMM
+    const set = new Set();
+    const allPO = await getAll(S.DON_HANG);
+    for (const po of allPO) {
+      if (po.trang_thai === C.PO_STATUS.DA_HUY) continue;
+      const m = /PO-(\d{6})-/.exec(po.ma_don_hang || '');
+      const poKey = m ? m[1] : (po.ngay_tao || '').slice(0, 7).replace('-', '');
+      if (poKey !== key) continue;
+      const cts = await getByIndex(S.CHI_TIET, 'id_don_hang', po.id_don_hang);
+      cts.forEach(c => set.add(c.ma_hang));
+    }
+    return set;
+  }
+
+  // Map ma_hang -> { thang:"YYYY-MM" } lần mua gần nhất ở các tháng TRƯỚC thang_nam
+  async function getLastPurchaseBeforeMonth(thang_nam) {
+    const curKey = thang_nam.replace('-', '');
+    const map = {};
+    const allPO = await getAll(S.DON_HANG);
+    for (const po of allPO) {
+      if (po.trang_thai === C.PO_STATUS.DA_HUY) continue;
+      const m = /PO-(\d{6})-/.exec(po.ma_don_hang || '');
+      const poKey = m ? m[1] : (po.ngay_tao || '').slice(0, 7).replace('-', '');
+      if (poKey >= curKey) continue; // chỉ xét tháng trước
+      const ym = poKey.slice(0, 4) + '-' + poKey.slice(4, 6);
+      const cts = await getByIndex(S.CHI_TIET, 'id_don_hang', po.id_don_hang);
+      cts.forEach(c => {
+        if (!map[c.ma_hang] || ym > map[c.ma_hang].thang) map[c.ma_hang] = { thang: ym };
+      });
+    }
+    return map;
+  }
+
   /* -------------------- 11. PO ENGINE: Auto-Split (Bước 3) -------------------- */
   // input: { thang_nam, items:[{...DATA fields, so_luong, don_gia_thuc_te}], minOrder, maxOrder }
   // KHÔNG gọi LLM — tính toán deterministic, chính xác 100%.
@@ -469,15 +511,33 @@ Hãy chọn và sắp xếp tối đa 3 mã phù hợp nhất. CHỈ trả JSON 
                   : (opts.id_ncc  ? [opts.id_ncc]  : []);
     const nhomSet = Array.isArray(opts.id_nhom) ? opts.id_nhom.filter(Boolean)
                   : (opts.id_nhom ? [opts.id_nhom] : []);
+
+    // === LỌC TRÙNG TRONG KỲ: lấy mã hàng đã có đơn (không-hủy) trong CÙNG tháng ===
+    const purchasedThisMonth = await getMaHangPurchasedInMonth(thang_nam);
+    // === CẢNH BÁO KỲ TRƯỚC: map ma_hang -> lần mua gần nhất ở các tháng TRƯỚC ===
+    const lastBuyMap = await getLastPurchaseBeforeMonth(thang_nam);
+
     let pool = await listData();
+    const warnItems = []; // gom cảnh báo chu kỳ để hiện cho người dùng
     pool = pool.filter(it => {
       if (nccSet.length  && !nccSet.includes(C.GROUP_TO_NCC[it.ma_nhom])) return false;
       if (nhomSet.length && !nhomSet.includes(it.id_nhom)) return false;
       if (opts.onlyDeHuHong && it.muc_do_hu_hong !== 'Dễ hư hỏng') return false;
-      return it.don_gia > 0;
+      if (it.don_gia <= 0) return false;
+      // (a) Loại trừ cứng: đã có đơn trong tháng này -> KHÔNG lấy lại
+      if (purchasedThisMonth.has(it.ma_hang)) return false;
+      // (b) Cảnh báo mềm: kỳ trước vừa mua mà chưa tới chu kỳ thay thế tối thiểu
+      const last = lastBuyMap[it.ma_hang];
+      if (last) {
+        const months = monthsBetweenYM(last.thang, thang_nam);
+        const ckMin = (it._ck_min != null) ? it._ck_min : (parseChuKy(it.chu_ky_thay_the)[0] || 0);
+        if (ckMin > 0 && months < ckMin) {
+          warnItems.push(`⚠️ ${it.ten_hang_hoa} (${it.ma_hang}): mua kỳ ${last.thang}, chu kỳ thay thế tối thiểu ${ckMin} tháng — chỉ mới ${months} tháng. Vẫn lấy nhưng nên cân nhắc.`);
+        }
+      }
+      return true;
     });
-
-    if (!pool.length) return { success: false, error: 'Không có vật tư phù hợp bộ lọc đã chọn.', purchase_orders: [] };
+    if (!pool.length) return { success: false, error: 'Không có vật tư phù hợp (có thể tất cả đã lên đơn trong kỳ này).', purchase_orders: [] };
 
     // 2) Gom pool theo NCC (mỗi PO chỉ 1 NCC — Supplier Isolation)
     const poolByNcc = {};
@@ -535,6 +595,13 @@ Hãy chọn và sắp xếp tối đa 3 mã phù hợp nhất. CHỈ trả JSON 
     const total_allocated = budget - remaining;
     if (remaining >= minOrder)
       warnings_general.push(`Còn dư ${fmt(remaining)} chưa phân bổ (đủ tạo thêm đơn nhưng pool vật tư hạn chế).`);
+
+    // Gộp cảnh báo chu kỳ (kỳ trước) — gọn, tối đa 10 dòng
+    if (warnItems.length) {
+      warnings_general.push(`Có ${warnItems.length} mặt tư mua sớm hơn chu kỳ thay thế (so với kỳ trước):`);
+      warnItems.slice(0, 10).forEach(w => warnings_general.push(w));
+      if (warnItems.length > 10) warnings_general.push(`… và ${warnItems.length - 10} mặt hàng khác.`);
+    }
 
     return {
       success: true, purchase_orders, warnings_general,
@@ -595,10 +662,12 @@ Hãy chọn và sắp xếp tối đa 3 mã phù hợp nhất. CHỈ trả JSON 
     try {
       const _ncc  = Array.isArray(params.opts?.id_ncc)  ? params.opts.id_ncc.filter(Boolean)  : (params.opts?.id_ncc  ? [params.opts.id_ncc]  : []);
       const _nhom = Array.isArray(params.opts?.id_nhom) ? params.opts.id_nhom.filter(Boolean) : (params.opts?.id_nhom ? [params.opts.id_nhom] : []);
+      const _bought = await getMaHangPurchasedInMonth(params.thang_nam);
       const pool = (await listData())
         .filter(it => (!_ncc.length  || _ncc.includes(C.GROUP_TO_NCC[it.ma_nhom]))
                    && (!_nhom.length || _nhom.includes(it.id_nhom))
-                   && it.don_gia > 0)
+                   && it.don_gia > 0
+                   && !_bought.has(it.ma_hang))
         .slice(0, 120)
         .map(it => ({ ma_hang: it.ma_hang, ten: it.ten_hang_hoa, dvt: it.dvt, gia: it.don_gia,
           ncc: C.GROUP_TO_NCC[it.ma_nhom], nhom: it.phan_loai_nhom_hang, id_nhom: it.id_nhom }));
@@ -680,6 +749,9 @@ Hãy chọn và sắp xếp tối đa 3 mã phù hợp nhất. CHỈ trả JSON 
     saveDonHang, listDonHang, getDonHang, listDonHangByKeHoach,
     listChiTietByDon, saveChiTiet, deleteDonHang, changePoStatus,
     buildPoCode, checkDuplicate,
+    // tiện ích nội bộ cho UI nâng cao (Debug 3 / import)
+    _store: S, _del: del, _clear: clearStore, _bulkPut: bulkPut, _get: get, _getAll: getAll,
+    getMaHangPurchasedInMonth, getLastPurchaseBeforeMonth, monthsBetweenYM,
     // PO engine
     buildPurchaseOrders, suggestSubstitutes, suggestFillItems,
     // thanh toán
@@ -688,8 +760,7 @@ Hãy chọn và sắp xếp tối đa 3 mã phù hợp nhất. CHỈ trả JSON 
     setSetting, getSetting, aiStatus, nvidiaOptimize,
     // backup
     exportBackup, importBackup,
-    // tiện ích nội bộ cho UI nâng cao (Debug 3 / import)
-    _del: del, _clear: clearStore, _bulkPut: bulkPut, _get: get, _getAll: getAll, _store: S, 
+    
     // auto-generator
     autoGeneratePOs, autoGeneratePOsAI,
     // CRUD NCC

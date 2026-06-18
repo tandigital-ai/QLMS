@@ -150,6 +150,21 @@ textarea { min-height: 64px; resize: vertical; }
 .modal-backdrop[hidden] { display: none; }
 .modal { background: #fff; border-radius: 14px; width: 100%; max-width: 540px; max-height: 90vh; display: flex; flex-direction: column; box-shadow: var(--shadow-lg); }
 .modal.modal-wide { max-width: 980px; }
+
+/* ===== DEBUG: Modal SIÊU RỘNG cho màn xem trước & chỉnh sửa đơn hàng loạt ===== */
+.modal.modal-xwide {
+  max-width: 96vw;     /* rộng 96% màn hình */
+  width: 96vw;
+  max-height: 94vh;    /* cao 94% màn hình */
+}
+.modal.modal-xwide .modal-body { max-height: calc(94vh - 130px); }
+/* Lưới đơn hàng tự co theo bề ngang: màn rộng hiện 3 cột, hẹp hiện 1-2 cột */
+.modal.modal-xwide .po-preview {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(440px, 1fr));
+  gap: 16px;
+}
+
 .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--border); }
 .modal-head h3 { font-size: 16px; }
 .modal-close { background: none; border: none; font-size: 18px; cursor: pointer; color: var(--muted); }
@@ -253,3 +268,100 @@ input[type="range"] { padding: 0; }
 .cell-inp:focus{border-color:var(--pri,#3b82f6);outline:none}
 .po-edit-tbl td{padding:3px 4px;vertical-align:middle}
 .cell-amt{text-align:right;font-weight:600;white-space:nowrap}
+
+/* =====================================================================
+ * BỔ SUNG: Combobox, Dropdown tick, Modal rộng, Responsive điện thoại
+ * ===================================================================== */
+
+/* ---------- COMBOBOX gõ-để-tìm (NCC / Công trình) ---------- */
+.combo { position: relative; }
+.combo-inp { width: 100%; }
+.combo-menu {
+  position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 50;
+  background: #fff; border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: var(--shadow-lg); max-height: 240px; overflow-y: auto; padding: 4px;
+}
+.combo-item { padding: 8px 11px; border-radius: 7px; cursor: pointer; font-size: 13.5px; }
+.combo-item:hover { background: var(--blue-bg); color: var(--blue); }
+.combo-empty { padding: 10px 11px; color: var(--muted); font-size: 13px; text-align: center; }
+
+/* ---------- DROPDOWN tick chọn nhiều ---------- */
+.multi-dd { position: relative; }
+.multi-dd-btn {
+  width: 100%; text-align: left; background: #fff; border: 1px solid var(--border);
+  border-radius: 8px; padding: 9px 32px 9px 11px; font-size: 14px; cursor: pointer;
+  color: var(--text); font-weight: 400; position: relative;
+}
+.multi-dd-btn::after {
+  content: "▾"; position: absolute; right: 12px; top: 50%; transform: translateY(-50%); color: var(--muted);
+}
+.multi-dd-btn.has-sel { border-color: var(--primary); color: var(--primary); font-weight: 600; }
+.multi-dd-panel {
+  position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 50;
+  background: #fff; border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: var(--shadow-lg); max-height: 240px; overflow-y: auto; padding: 6px;
+}
+.dd-item {
+  display: flex; align-items: center; gap: 9px; padding: 8px 10px; border-radius: 7px;
+  cursor: pointer; font-size: 13.5px; font-weight: 400; color: var(--text);
+}
+.dd-item:hover { background: var(--gray-bg); }
+.dd-item input { width: auto; margin: 0; flex-shrink: 0; }
+
+/* ---------- MODAL SIÊU RỘNG (xem trước & chỉnh sửa đơn loạt) ---------- */
+.modal.modal-xwide { max-width: 96vw; width: 96vw; max-height: 94vh; }
+.modal.modal-xwide .modal-body { max-height: calc(94vh - 130px); }
+.modal.modal-xwide .po-preview {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(440px, 1fr)); gap: 16px;
+}
+
+/* ---------- Ô nhập trong bảng sửa đơn ---------- */
+.cell-inp { width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 3px 6px; font-size: 13px; }
+.cell-inp:focus { border-color: var(--primary); outline: none; }
+.po-edit-tbl td { padding: 3px 4px; vertical-align: middle; }
+.cell-amt { text-align: right; font-weight: 600; white-space: nowrap; }
+
+/* =====================================================================
+ * RESPONSIVE ĐIỆN THOẠI — tối ưu hiển thị
+ * ===================================================================== */
+@media (max-width: 900px) {
+  /* Modal chiếm gần kín màn hình điện thoại */
+  .modal, .modal.modal-wide, .modal.modal-xwide {
+    max-width: 100vw; width: 100%; max-height: 96vh; border-radius: 12px;
+  }
+  .modal.modal-xwide .modal-body { max-height: calc(96vh - 120px); }
+  .modal.modal-xwide .po-preview { grid-template-columns: 1fr; }
+  .modal-backdrop { padding: 8px; }
+
+  /* Toolbar nút xuống dòng gọn */
+  .topbar-actions { width: 100%; }
+  .topbar-actions .btn { flex: 1; justify-content: center; }
+
+  /* Bảng cuộn ngang được trên điện thoại */
+  .card { overflow-x: auto; }
+  .tbl { min-width: 560px; }
+}
+
+@media (max-width: 560px) {
+  body { font-size: 13.5px; }
+  .topbar h1 { font-size: 16px; }
+  .content { padding: 12px; }
+
+  /* Form 1 cột trên điện thoại */
+  .form-grid { grid-template-columns: 1fr; gap: 12px; }
+
+  /* Bảng sửa đơn: cho cuộn ngang, không vỡ layout */
+  .po-edit-tbl { min-width: 520px; }
+  .po-card { overflow-x: auto; }
+
+  /* Nút thao tác trong bảng to hơn để dễ chạm */
+  .ibtn { width: 36px; height: 36px; font-size: 15px; }
+  .tbl .act { flex-wrap: wrap; }
+
+  /* Combobox / dropdown menu cao vừa phải */
+  .combo-menu, .multi-dd-panel { max-height: 200px; }
+
+  /* Nút trong modal xếp dọc, full chiều ngang */
+  .modal-foot { flex-direction: column-reverse; }
+  .modal-foot .btn { width: 100%; justify-content: center; }
+}

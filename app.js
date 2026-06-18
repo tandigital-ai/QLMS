@@ -45,6 +45,7 @@
       $('#modalFoot').appendChild(btn);
     });
     $('#modalBox').classList.toggle('modal-wide', !!wide);
+    $('#modalBox').classList.toggle('modal-xwide', !!arguments[0].xwide);
     $('#modalBackdrop').hidden = false;
   }
   function closeModal() { $('#modalBackdrop').hidden = true; $('#modalBody').innerHTML = ''; }
@@ -829,15 +830,36 @@
    *  DEBUG 3 — SỬA ĐƠN HÀNG (chỉ khi Nháp / Đã gửi đơn)
    *  Cùng cơ chế editor với Debug 2: thêm/xóa dòng, sửa SL/đơn giá/tên.
    * ==================================================================== */
+  /* ====================================================================
+   *  SỬA ĐƠN HÀNG TOÀN DIỆN (Debug)
+   *  - Sửa Mã đơn, Nhà cung cấp, Mã công trình (qua ô nhập-tìm gợi ý)
+   *  - Thêm/Xóa dòng, sửa Mã hàng/Tên/ĐVT/SL/Đơn giá
+   *  Chỉ cho sửa khi đơn ở trạng thái Nháp / Đã gửi đơn.
+   * ==================================================================== */
   async function openPoEditor(id) {
     const po = await window.API.getDonHang(id);
     if (![C.PO_STATUS.NHAP, C.PO_STATUS.DA_GUI].includes(po.trang_thai))
       return toast('Chỉ sửa được đơn ở trạng thái Nháp / Đã gửi đơn', 'error');
-    const cts = await window.API.listChiTietByDon(id);
+
+    const [cts, nccList, cts2, khs] = await Promise.all([
+      window.API.listChiTietByDon(id),
+      window.API.listNCC(),
+      window.API.listCongTrinh(),
+      window.API.listKeHoach(),
+    ]);
     AppState.cache.allData = AppState.cache.allData || await window.API.listData();
+
+    const kh = po.id_ke_hoach ? khs.find(k => k.id_ke_hoach === po.id_ke_hoach) : null;
+    const curCt = kh ? cts2.find(c => c.id_cong_trinh === kh.id_cong_trinh) : null;
+
     AppState.cache.poEdit = {
-      id_don_hang: id, ma_don_hang: po.ma_don_hang, id_ncc: po.id_ncc,
-      origCt: cts,   // để biết dòng nào cần xóa khi lưu
+      id_don_hang: id,
+      ma_don_hang: po.ma_don_hang,
+      id_ncc: po.id_ncc,
+      id_ke_hoach: po.id_ke_hoach || null,
+      id_cong_trinh: curCt ? curCt.id_cong_trinh : (kh ? kh.id_cong_trinh : null),
+      nccList, ctList: cts2,
+      origCt: cts,
       lines: cts.map(c => ({
         id_chi_tiet: c.id_chi_tiet, ma_hang: c.ma_hang, ten_hang_hoa: c.ten_hang_hoa,
         dvt: c.dvt, so_luong: c.so_luong, don_gia_thuc_te: c.don_gia_thuc_te,
@@ -848,8 +870,37 @@
     openModal({
       wide: true,
       title: '✏️ Sửa đơn — ' + po.ma_don_hang,
-      body: `<div class="po-card"><div id="poEditOne"></div>
-        <button class="btn btn-sm btn-light" id="poEditAdd">➕ Thêm dòng</button></div>
+      body: `
+        <div class="form-grid">
+          <label>Mã đơn hàng *
+            <input id="pe_ma" value="${esc(po.ma_don_hang)}" placeholder="VD: PO-202606-NCC001-001"></label>
+          <label>Nhà cung cấp * (gõ để tìm)
+            <div class="combo" id="combo_ncc">
+              <input type="text" class="combo-inp" id="pe_ncc" autocomplete="off"
+                value="${esc(nccDisplay(nccList, po.id_ncc))}" placeholder="Gõ mã hoặc tên NCC…">
+              <input type="hidden" id="pe_ncc_id" value="${esc(po.id_ncc || '')}">
+              <div class="combo-menu" id="menu_ncc" hidden></div>
+            </div>
+          </label>
+          <label class="col-2">Công trình (gõ để tìm)
+            <div class="combo" id="combo_ct">
+              <input type="text" class="combo-inp" id="pe_ct" autocomplete="off"
+                value="${esc(ctDisplay(cts2, AppState.cache.poEdit.id_cong_trinh))}" placeholder="Gõ mã hoặc tên công trình…">
+              <input type="hidden" id="pe_ct_id" value="${esc(AppState.cache.poEdit.id_cong_trinh || '')}">
+              <div class="combo-menu" id="menu_ct" hidden></div>
+            </div>
+          </label>
+          <label>Trạng thái
+            <select id="pe_tt">${Object.values(C.PO_STATUS).map(s => `<option ${po.trang_thai === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
+          </label>
+          <label>Ngày tạo đơn
+            <input id="pe_ngay" type="datetime-local" value="${esc(toDatetimeLocal(po.ngay_tao))}">
+          </label>
+        </div>
+        <div class="po-card" style="margin-top:14px">
+          <div id="poEditOne"></div>
+          <button class="btn btn-sm btn-light" id="poEditAdd">➕ Thêm dòng</button>
+        </div>
         <div class="alert" id="poEditOneSum"></div>`,
       foot: [
         { label: 'Hủy', class: 'btn-light', onClick: closeModal },
@@ -857,6 +908,69 @@
       ],
     });
     renderPoEditorOne();
+    // Gắn combobox gõ-để-tìm cho NCC & Công trình
+    setupCombo('combo_ncc', 'pe_ncc', 'pe_ncc_id', 'menu_ncc',
+      nccList.map(n => ({ id: n.id_ncc, label: `${n.id_ncc} - ${n.ten_ncc}`, search: `${n.id_ncc} ${n.ten_ncc}`.toLowerCase() })));
+    setupCombo('combo_ct', 'pe_ct', 'pe_ct_id', 'menu_ct',
+      cts2.map(c => ({ id: c.id_cong_trinh, label: `${c.ma_cong_trinh} - ${c.ten_cong_trinh}`, search: `${c.ma_cong_trinh} ${c.ten_cong_trinh}`.toLowerCase() })));
+  }
+
+  // Hiển thị "NCCxxx - Tên NCC" từ id
+  function nccDisplay(list, id) {
+    const n = list.find(x => x.id_ncc === id);
+    return n ? `${n.id_ncc} - ${n.ten_ncc}` : (id || '');
+  }
+  // Hiển thị "Mã CT - Tên CT" từ id
+  function ctDisplay(list, id) {
+    const c = list.find(x => x.id_cong_trinh === id);
+    return c ? `${c.ma_cong_trinh} - ${c.ten_cong_trinh}` : '';
+  }
+
+  // Chuyển "YYYY-MM-DD HH:mm:ss" -> "YYYY-MM-DDTHH:mm" (cho input datetime-local)
+  function toDatetimeLocal(s) {
+    if (!s) return '';
+    const m = String(s).replace(' ', 'T');
+    return m.slice(0, 16);
+  }
+  // Chuyển ngược lại để lưu
+  function fromDatetimeLocal(s) {
+    if (!s) return '';
+    return s.replace('T', ' ') + (s.length === 16 ? ':00' : '');
+  }
+
+  /* ====================================================================
+   *  COMBOBOX gõ-để-tìm (dùng cho NCC, Công trình…)
+   *  inpId: ô nhập hiển thị | hidId: ô ẩn lưu id | menuId: vùng danh sách
+   *  items: [{id, label, search}]
+   * ==================================================================== */
+  function setupCombo(comboId, inpId, hidId, menuId, items) {
+    const wrap = document.getElementById(comboId);
+    const inp = document.getElementById(inpId);
+    const hid = document.getElementById(hidId);
+    const menu = document.getElementById(menuId);
+    if (!inp || !menu) return;
+
+    const draw = (q) => {
+      const kw = (q || '').trim().toLowerCase();
+      const list = !kw ? items : items.filter(it => it.search.includes(kw));
+      menu.innerHTML = list.length
+        ? list.slice(0, 60).map(it => `<div class="combo-item" data-id="${esc(it.id)}" data-label="${esc(it.label)}">${esc(it.label)}</div>`).join('')
+        : `<div class="combo-empty">Không tìm thấy</div>`;
+      menu.hidden = false;
+      // gắn click chọn
+      Array.from(menu.querySelectorAll('.combo-item')).forEach(el => {
+        el.onmousedown = (e) => {   // mousedown để chạy trước blur
+          e.preventDefault();
+          inp.value = el.dataset.label;
+          hid.value = el.dataset.id;
+          menu.hidden = true;
+        };
+      });
+    };
+
+    inp.addEventListener('focus', () => draw(inp.value));
+    inp.addEventListener('input', () => { hid.value = ''; draw(inp.value); });
+    inp.addEventListener('blur', () => { setTimeout(() => { menu.hidden = true; }, 150); });
   }
 
   function renderPoEditorOne() {
@@ -870,8 +984,8 @@
           <th style="width:80px">SL</th><th style="width:120px">Đơn giá</th><th style="width:120px">Thành tiền</th><th style="width:40px"></th></tr></thead>
         <tbody>${E.lines.map((l, i) => `
           <tr>
-            <td><input class="cell-inp" list="dlMaHangPo" value="${esc(l.ma_hang || '')}" data-f="ma" data-i="${i}"></td>
-            <td><input class="cell-inp" value="${esc(l.ten_hang_hoa || '')}" data-f="ten" data-i="${i}"></td>
+            <td><input class="cell-inp" list="dlMaHangPo" value="${esc(l.ma_hang || '')}" data-f="ma" data-i="${i}" placeholder="Mã / tên"></td>
+            <td><input class="cell-inp" value="${esc(l.ten_hang_hoa || '')}" data-f="ten" data-i="${i}" placeholder="Tên mặt hàng"></td>
             <td><input class="cell-inp" value="${esc(l.dvt || '')}" data-f="dvt" data-i="${i}"></td>
             <td><input class="cell-inp" type="number" min="1" value="${l.so_luong}" data-f="sl" data-i="${i}"></td>
             <td><input class="cell-inp" type="number" min="0" value="${l.don_gia_thuc_te}" data-f="dg" data-i="${i}"></td>
@@ -904,16 +1018,50 @@
 
   async function savePoEditor() {
     const E = AppState.cache.poEdit;
+
+    // 1) Đọc & kiểm tra các trường đầu đơn
+    const newMa = $('#pe_ma').value.trim();
+    if (!newMa) return toast('Mã đơn không được để trống', 'error');
+
+    // Nhà cung cấp: ưu tiên id đã chọn (ô ẩn), nếu không có thì khớp theo chữ đã gõ
+    let nccObj = E.nccList.find(n => n.id_ncc === ($('#pe_ncc_id').value || '').trim());
+    if (!nccObj) nccObj = matchNcc(E.nccList, $('#pe_ncc').value.trim());
+    if (!nccObj) return toast('Nhà cung cấp không hợp lệ — hãy chọn từ danh sách gợi ý', 'error');
+
+    // Công trình: tùy chọn — ưu tiên id đã chọn
+    let ctObj = E.ctList.find(c => c.id_cong_trinh === ($('#pe_ct_id').value || '').trim());
+    if (!ctObj && $('#pe_ct').value.trim()) {
+      ctObj = matchCt(E.ctList, $('#pe_ct').value.trim());
+      if (!ctObj) return toast('Công trình không hợp lệ — hãy chọn từ danh sách gợi ý', 'error');
+    }
+
+    // 2) Lọc dòng hợp lệ
     const lines = E.lines.filter(l => l.ten_hang_hoa && l.so_luong > 0);
     if (!lines.length) return toast('Đơn phải có ít nhất 1 dòng hợp lệ', 'error');
     lines.forEach(l => l.thanh_tien = l.so_luong * l.don_gia_thuc_te);
     const giaTri = lines.reduce((a, l) => a + l.thanh_tien, 0);
 
-    // 1) Xóa các CHI_TIET cũ không còn (so theo id_chi_tiet)
+    // 3) Kiểm tra trùng mã đơn (nếu đổi mã)
+    if (newMa !== E.ma_don_hang) {
+      const all = await window.API.listDonHang();
+      if (all.some(d => d.ma_don_hang === newMa && d.id_don_hang !== E.id_don_hang))
+        return toast('Mã đơn đã tồn tại, hãy chọn mã khác', 'error');
+    }
+
+    // 4) Nếu đổi công trình -> cập nhật vào kế hoạch của đơn (nếu có kế hoạch)
+    if (ctObj && E.id_ke_hoach) {
+      const kh = await window.API.getKeHoach(E.id_ke_hoach);
+      if (kh && kh.id_cong_trinh !== ctObj.id_cong_trinh) {
+        kh.id_cong_trinh = ctObj.id_cong_trinh;
+        await window.API.saveKeHoach(kh);
+      }
+    }
+
+    // 5) Xóa các dòng chi tiết cũ không còn
     const keepIds = new Set(lines.filter(l => l.id_chi_tiet).map(l => l.id_chi_tiet));
     for (const c of E.origCt) if (!keepIds.has(c.id_chi_tiet)) await window.API._del(window.API._store.CHI_TIET, c.id_chi_tiet);
 
-    // 2) Lưu (update / thêm mới) các dòng hiện tại
+    // 6) Lưu các dòng hiện tại
     for (const l of lines) {
       await window.API.saveChiTiet({
         id_chi_tiet: l.id_chi_tiet, id_don_hang: E.id_don_hang,
@@ -923,12 +1071,38 @@
         thanh_tien: l.thanh_tien, ghi_chu_dong: '',
       });
     }
-    // 3) Cập nhật giá trị đơn
+
+    // 7) Cập nhật đơn hàng (mã, NCC, giá trị)
     const po = await window.API.getDonHang(E.id_don_hang);
+    po.ma_don_hang = newMa;
+    po.id_ncc = nccObj.id_ncc;
     po.gia_tri_don_hang = giaTri;
     await window.API.saveDonHang(po);
 
     closeModal(); toast('Đã lưu thay đổi đơn hàng', 'success'); renderDonHang();
+  }
+
+  // So khớp NCC từ chuỗi nhập (ưu tiên "NCCxxx - tên", sau đó theo mã, theo tên gần đúng)
+  function matchNcc(list, raw) {
+    if (!raw) return null;
+    const code = raw.split(' - ')[0].trim().toUpperCase();
+    let n = list.find(x => x.id_ncc.toUpperCase() === code);
+    if (n) return n;
+    const low = raw.toLowerCase();
+    n = list.find(x => x.id_ncc.toLowerCase() === low || x.ten_ncc.toLowerCase() === low);
+    if (n) return n;
+    return list.find(x => x.ten_ncc.toLowerCase().includes(low)) || null;
+  }
+  // So khớp Công trình tương tự
+  function matchCt(list, raw) {
+    if (!raw) return null;
+    const code = raw.split(' - ')[0].trim().toUpperCase();
+    let c = list.find(x => (x.ma_cong_trinh || '').toUpperCase() === code);
+    if (c) return c;
+    const low = raw.toLowerCase();
+    c = list.find(x => (x.ma_cong_trinh || '').toLowerCase() === low || (x.ten_cong_trinh || '').toLowerCase() === low);
+    if (c) return c;
+    return list.find(x => (x.ten_cong_trinh || '').toLowerCase().includes(low)) || null;
   }
 
   function confirmDelPO(id) {
@@ -1358,8 +1532,12 @@
           <label class="btn btn-light">⬆️ Phục hồi từ file<input id="fileRestore" type="file" accept=".json" hidden></label>
         </div>`)}
       ${card(`<h3>📥 Nhập danh mục từ Excel/JSON</h3>
-        <p class="muted">Nạp file 300 mặt hàng thật (cột: ma_hang, ten_hang_hoa, dvt, don_gia, gia_thi_truong, phan_loai_nhom_hang, id_nhom, ma_nhom, nha_cung_cap, muc_dich_su_dung, muc_do_hu_hong, chu_ky_thay_the, phan_loai_chi_phi). Sẽ thay thế danh mục hiện tại.</p>
-        <label class="btn btn-warn">Chọn file Excel/JSON<input id="fileImport" type="file" accept=".xlsx,.xls,.json" hidden></label>`)}
+        <p class="muted">Nạp file danh mục (đúng cấu trúc cột bên dưới). Sẽ thay thế danh mục hiện tại.</p>
+        <div class="btn-row">
+          <button class="btn btn-light" id="btnTemplate">⬇️ Tải file template mẫu (.xlsx)</button>
+          <label class="btn btn-warn">📁 Chọn file Excel/JSON để nhập<input id="fileImport" type="file" accept=".xlsx,.xls,.json" hidden></label>
+        </div>
+        <p class="muted" style="margin-top:8px">Cột bắt buộc: <b>ma_hang, ten_hang_hoa, dvt, don_gia, gia_thi_truong, phan_loai_nhom_hang, id_nhom, ma_nhom, nha_cung_cap, muc_dich_su_dung, muc_do_hu_hong, chu_ky_thay_the, phan_loai_chi_phi</b>. Cột <b>muc_do_hu_hong</b> nhận: "Dễ hư hỏng" / "Trung bình" / "Bền". Cột <b>chu_ky_thay_the</b> ghi dạng "từ 3 đến 6 tháng" hoặc "1 tháng".</p>`)}
       ${card(`<h3>⚠️ Xóa & khởi tạo lại dữ liệu mẫu</h3>
         <button class="btn btn-danger" id="btnReset">Xóa toàn bộ & nạp 300 mẫu</button>`)}`;
 
@@ -1386,6 +1564,7 @@
       rd.readAsText(f);
     };
     $('#fileImport').onchange = (e) => importCatalog(e.target.files[0]);
+    $('#btnTemplate').onclick = () => downloadCatalogTemplate();
     $('#btnReset').onclick = () => openModal({
       title: 'Xác nhận', body: '<p>Xóa TOÀN BỘ dữ liệu và nạp lại 300 mặt hàng mẫu?</p>',
       foot: [
@@ -1428,6 +1607,22 @@
     }
   }
 
+    // Tải file Excel template mẫu cho danh mục vật tư
+  function downloadCatalogTemplate() {
+    const header = ['ma_hang','ten_hang_hoa','dvt','don_gia','gia_thi_truong','phan_loai_nhom_hang','id_nhom','ma_nhom','nha_cung_cap','muc_dich_su_dung','muc_do_hu_hong','chu_ky_thay_the','phan_loai_chi_phi'];
+    const sample = [
+      ['CDM-001','Máy bơm chìm 3HP','Cái',12500000,'11000000 - 16000000','Cơ điện - Máy móc','NH01','CDM','NCC001','Bơm hút nước thải','Trung bình','từ 12 đến 18 tháng','Chi phí thiết bị'],
+      ['CDM-002','Tụ điện khởi động 50µF','Cái',95000,'80000 - 130000','Cơ điện - Máy móc','NH01','CDM','NCC001','Khởi động mô tơ','Dễ hư hỏng','từ 1 đến 3 tháng','Chi phí vật tư'],
+      ['BHL-001','Găng tay cao su','Đôi',25000,'20000 - 35000','Bảo hộ lao động','NH05','BHL','NCC005','Bảo hộ tay','Dễ hư hỏng','1 tháng','Chi phí vật tư'],
+    ];
+    const ws = XLSX.utils.aoa_to_sheet([header, ...sample]);
+    ws['!cols'] = header.map(h => ({ wch: Math.max(14, h.length + 2) }));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Template');
+    XLSX.writeFile(wb, 'Template_DanhMuc_VatTu.xlsx');
+    toast('Đã tải file template mẫu', 'success');
+  }
+
   /* ====================================================================
    *  TẠO ĐƠN HÀNG LOẠT (Auto-Generate) — chọn kế hoạch + cấu hình
    * ==================================================================== */
@@ -1449,14 +1644,20 @@
           </label>
           <label>Giá trị tối thiểu / đơn (₫)<input id="ag_min" type="number" value="${C.ORDER_CONSTRAINTS.MIN_ORDER}"></label>
           <label>Giá trị tối đa / đơn (₫)<input id="ag_max" type="number" value="${C.ORDER_CONSTRAINTS.MAX_ORDER}"></label>
-          <label class="col-2">Giới hạn NCC (tick chọn nhiều — bỏ trống = tất cả)
-            <div class="chk-grid" id="ag_ncc">
-              ${nccs.map(n => `<label class="chk-pill"><input type="checkbox" value="${n.id_ncc}"> ${esc(n.id_ncc)} - ${esc(n.ten_ncc)}</label>`).join('')}
+          <label class="col-2">Giới hạn NCC (bỏ trống = tất cả)
+            <div class="multi-dd" id="dd_ncc">
+              <button type="button" class="multi-dd-btn" id="ddbtn_ncc">— Tất cả NCC —</button>
+              <div class="multi-dd-panel" id="ddpanel_ncc" hidden>
+                ${nccs.map(n => `<label class="dd-item"><input type="checkbox" value="${n.id_ncc}"> <span>${esc(n.id_ncc)} - ${esc(n.ten_ncc)}</span></label>`).join('')}
+              </div>
             </div>
           </label>
-          <label class="col-2">Giới hạn nhóm (tick chọn nhiều — bỏ trống = tất cả)
-            <div class="chk-grid" id="ag_nhom">
-              ${nhoms.map(n => `<label class="chk-pill"><input type="checkbox" value="${n.id_nhom}"> ${esc(n.ten_nhom)}</label>`).join('')}
+          <label class="col-2">Giới hạn nhóm (bỏ trống = tất cả)
+            <div class="multi-dd" id="dd_nhom">
+              <button type="button" class="multi-dd-btn" id="ddbtn_nhom">— Tất cả nhóm —</button>
+              <div class="multi-dd-panel" id="ddpanel_nhom" hidden>
+                ${nhoms.map(n => `<label class="dd-item"><input type="checkbox" value="${n.id_nhom}"> <span>${esc(n.ten_nhom)}</span></label>`).join('')}
+              </div>
             </div>
           </label>
           <label class="col-2"><input type="checkbox" id="ag_dehu" style="width:auto"> Chỉ chọn vật tư "Dễ hư hỏng"</label>
@@ -1470,6 +1671,27 @@
         { label: ai.nvidia ? '🤖 Bằng AI (NVIDIA)' : '🤖 AI (cần key)', class: 'btn-warn', onClick: () => runAutoGenerate(true) },
       ],
     });
+    // Điều khiển 2 dropdown tick chọn nhiều
+    setupMultiDropdown('dd_ncc', 'ddbtn_ncc', 'ddpanel_ncc', '— Tất cả NCC —', 'NCC');
+    setupMultiDropdown('dd_nhom', 'ddbtn_nhom', 'ddpanel_nhom', '— Tất cả nhóm —', 'nhóm');
+  }
+
+  // Dropdown tick chọn nhiều — cập nhật nhãn nút theo số lượng đã chọn
+  function setupMultiDropdown(ddId, btnId, panelId, allLabel, unit) {
+    const dd = document.getElementById(ddId);
+    const btn = document.getElementById(btnId);
+    const panel = document.getElementById(panelId);
+    if (!btn || !panel) return;
+    const sync = () => {
+      const n = panel.querySelectorAll('input:checked').length;
+      btn.textContent = n === 0 ? allLabel : `Đã chọn ${n} ${unit}`;
+      btn.classList.toggle('has-sel', n > 0);
+    };
+    btn.onclick = (e) => { e.preventDefault(); panel.hidden = !panel.hidden; };
+    panel.querySelectorAll('input').forEach(i => i.onchange = sync);
+    // bấm ra ngoài thì đóng
+    document.addEventListener('click', (e) => { if (dd && !dd.contains(e.target)) panel.hidden = true; });
+    sync();
   }
 
   async function runAutoGenerate(useAI) {
@@ -1484,12 +1706,12 @@
     const budget = kh.tong_du_tru - used;
     if (budget < minOrder) return toast(`Ngân sách còn lại ${fmt(budget)} không đủ tạo đơn`, 'error', 5000);
 
-    const pickChk = (sel) => $$(`#${sel} input:checked`, $('#modalBody')).map(i => i.value);
+    const pickChk = (panelId) => $$(`#${panelId} input:checked`, $('#modalBody')).map(i => i.value);
     const params = {
       thang_nam: kh.thang_nam, budget, minOrder, maxOrder,
       opts: {
-        id_ncc:  pickChk('ag_ncc'),     // mảng [] (Debug 1)
-        id_nhom: pickChk('ag_nhom'),    // mảng [] (Debug 1)
+        id_ncc:  pickChk('ddpanel_ncc'),   // mảng [] (Debug 1)
+        id_nhom: pickChk('ddpanel_nhom'),  // mảng [] (Debug 1)
         onlyDeHuHong: $('#ag_dehu').checked,
         fillRatio: Number($('#ag_fr').value) / 100,
       },
@@ -1523,6 +1745,7 @@
 
     openModal({
       wide: true,
+      xwide: true,
       title: `⚡ Xem trước & chỉnh sửa ${result.purchase_orders.length} đơn`,
       body: `
         ${result.warnings_general.length ? `<div class="alert alert-warn">${result.warnings_general.map(esc).join('<br>')}</div>` : ''}
