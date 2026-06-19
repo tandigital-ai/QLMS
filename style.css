@@ -157,11 +157,11 @@ textarea { min-height: 64px; resize: vertical; }
   width: 96vw;
   max-height: 94vh;    /* cao 94% màn hình */
 }
-.modal.modal-xwide .modal-body { max-height: calc(94vh - 130px); }
+.modal.modal-xwide .modal-body { max-height: calc(94vh - 120px); overflow-y: auto; padding: 14px 16px; }
 /* Lưới đơn hàng tự co theo bề ngang: màn rộng hiện 3 cột, hẹp hiện 1-2 cột */
 .modal.modal-xwide .po-preview {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(440px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
 }
 
@@ -313,16 +313,10 @@ input[type="range"] { padding: 0; }
 
 /* ---------- MODAL SIÊU RỘNG (xem trước & chỉnh sửa đơn loạt) ---------- */
 .modal.modal-xwide { max-width: 96vw; width: 96vw; max-height: 94vh; }
-.modal.modal-xwide .modal-body { max-height: calc(94vh - 130px); }
+.modal.modal-xwide .modal-body { max-height: calc(94vh - 120px); overflow-y: auto; padding: 14px 16px; }
 .modal.modal-xwide .po-preview {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(440px, 1fr)); gap: 16px;
 }
-
-/* ---------- Ô nhập trong bảng sửa đơn ---------- */
-.cell-inp { width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 3px 6px; font-size: 13px; }
-.cell-inp:focus { border-color: var(--primary); outline: none; }
-.po-edit-tbl td { padding: 3px 4px; vertical-align: middle; }
-.cell-amt { text-align: right; font-weight: 600; white-space: nowrap; }
 
 /* =====================================================================
  * RESPONSIVE ĐIỆN THOẠI — tối ưu hiển thị
@@ -367,4 +361,61 @@ input[type="range"] { padding: 0; }
   /* Nút trong modal xếp dọc, full chiều ngang */
   .modal-foot { flex-direction: column-reverse; }
   .modal-foot .btn { width: 100%; justify-content: center; }
+}
+
+/* =====================================================================
+ * FIX MODAL XEM TRƯỚC ĐƠN HÀNG LOẠT — bản chuẩn (ghi đè)
+ * Mục tiêu: luôn 2 thẻ/hàng, bảng đủ chỗ, TÊN MẶT HÀNG hiện đầy đủ, nút X nhỏ.
+ * ===================================================================== */
+
+/* 1) Lưới đơn: ÉP ĐÚNG 2 CỘT, mỗi thẻ co giãn đều, không tràn */
+.modal.modal-xwide .po-preview {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+/* 2) Thẻ đơn: cho phép nội dung bên trong co lại đúng cách */
+.modal.modal-xwide .po-card { min-width: 0; overflow: visible; padding: 12px 14px; }
+
+/* 3) Bảng sửa đơn: KHÔNG fixed — để các cột tự giãn theo nội dung,
+      chỉ khống chế cột Tên rộng nhất và cho phép xuống dòng. */
+.modal.modal-xwide .po-edit-tbl { width: 100%; table-layout: auto; border-collapse: collapse; }
+.modal.modal-xwide .po-edit-tbl th,
+.modal.modal-xwide .po-edit-tbl td { padding: 5px 6px; vertical-align: middle; }
+.modal.modal-xwide .po-edit-tbl th {
+  font-size: 11px; white-space: nowrap; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .2px;
+}
+
+/* 4) Cột TÊN MẶT HÀNG: ưu tiên rộng nhất, cho ô nhập xuống dòng nếu cần */
+.modal.modal-xwide .po-edit-tbl td:nth-child(2) { width: 38%; min-width: 150px; }
+.modal.modal-xwide .po-edit-tbl td:nth-child(1) { min-width: 92px; }   /* Mã */
+.modal.modal-xwide .po-edit-tbl td:nth-child(3) { width: 56px; }       /* ĐVT */
+.modal.modal-xwide .po-edit-tbl td:nth-child(4) { width: 54px; }       /* SL */
+
+/* 5) Ô nhập: hiển thị trọn nội dung, không cắt chữ */
+.modal.modal-xwide .cell-inp {
+  width: 100%; border: 1px solid var(--border); border-radius: 6px;
+  padding: 5px 7px; font-size: 12.5px; text-overflow: ellipsis;
+}
+.modal.modal-xwide .cell-inp:focus { border-color: var(--primary); outline: none; }
+.modal.modal-xwide .cell-amt {
+  text-align: right; font-weight: 600; white-space: nowrap; font-size: 12px;
+}
+
+/* 6) Nút X xóa dòng: NHỎ GỌN */
+.modal.modal-xwide .po-edit-tbl .ibtn {
+  width: 22px; height: 22px; min-width: 22px; font-size: 11px;
+  border-radius: 5px; padding: 0; line-height: 1;
+}
+.modal.modal-xwide .po-edit-tbl td:last-child { width: 30px; text-align: center; }
+
+/* 7) Vùng nội dung modal cao & thoáng hơn */
+.modal.modal-xwide .modal-body { max-height: calc(94vh - 120px); overflow-y: auto; padding: 14px 16px; }
+
+/* 8) Màn hình hẹp (≤1100px) tự về 1 thẻ/hàng cho dễ đọc */
+@media (max-width: 1100px) {
+  .modal.modal-xwide .po-preview { grid-template-columns: 1fr; }
 }

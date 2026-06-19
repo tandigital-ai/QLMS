@@ -623,6 +623,22 @@ Hãy chọn và sắp xếp tối đa 3 mã phù hợp nhất. CHỈ trả JSON 
     // Tỷ lệ cho phép trùng mặt hàng so với các kỳ TRƯỚC (0 = chặn tuyệt đối; 1 = cho trùng thoải mái)
     const dupRatio = Math.min(1, Math.max(0, opts.dupRatio != null ? opts.dupRatio : 0));
 
+    // ===== HẠT GIỐNG XÁO TRỘN NHẸ (Debug 1 - Phần A) =====
+    // JITTER: mức xáo trộn (0 = không xáo; càng lớn càng đa dạng). Tăng 0.18 -> 0.35 để mạnh hơn.
+    const JITTER = 0.18;
+    // Hạt giống: nếu người dùng để trống -> sinh ngẫu nhiên theo thời gian (mỗi lần khác);
+    //            nếu nhập số cố định -> luôn ra cùng một phương án (để so sánh/kiểm thử).
+    let _seedVal = (opts.seed != null && opts.seed !== '' && !isNaN(Number(opts.seed)))
+      ? (Number(opts.seed) >>> 0)
+      : ((Date.now() ^ (Math.random() * 0xffffffff)) >>> 0);
+    // PRNG mulberry32 — tất định theo hạt giống, trả số thực trong [0,1)
+    function _rng() {
+      _seedVal |= 0; _seedVal = (_seedVal + 0x6D2B79F5) | 0;
+      let t = Math.imul(_seedVal ^ (_seedVal >>> 15), 1 | _seedVal);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    }
+
     if (!budget || budget < minOrder)
       return { success: false, error: `Ngân sách ${fmt(budget)} nhỏ hơn giá trị tối thiểu 1 đơn ${fmt(minOrder)}.`, purchase_orders: [] };
 
@@ -717,7 +733,7 @@ Hãy chọn và sắp xếp tối đa 3 mã phù hợp nhất. CHỈ trả JSON 
       const cap = Math.min(maxOrder, remaining);
       if (cap < minOrder) break;
       const aim = Math.min(targetPerPO, cap);
-      const lines = packOnePO(items, aim, minOrder, cap, usedMaHang);
+      const lines = packOnePO(items, aim, minOrder, cap, usedMaHang, _rng, JITTER);
       if (!lines.length) {
         // NCC này đã hết vật tư chưa-dùng đủ tạo đơn -> loại khỏi vòng xoay để tránh lặp vô ích
         poolByNcc[ncc] = [];
@@ -763,18 +779,42 @@ Hãy chọn và sắp xếp tối đa 3 mã phù hợp nhất. CHỈ trả JSON 
   //   1) Bỏ qua mã đã dùng (used) và mã có giá > cap.
   //   2) Ưu tiên đa dạng NHÓM HÀNG (mỗi đơn cố gắng gồm nhiều nhóm khác nhau).
   //   3) Trong cùng nhóm, ưu tiên đơn giá lớn trước để lấp đầy nhanh, gọn dòng.
-  function packOnePO(items, aim, floorMin, cap, used) {
+  function packOnePO(items, aim, floorMin, cap, used, rng, jitter) {
     used = used || new Set();
+    rng = rng || Math.random;           // fallback nếu không truyền hạt giống
+    jitter = (jitter == null) ? 0 : jitter;
     // Lọc ứng viên: chưa dùng, giá hợp lệ
     let cands = items.filter(it => !used.has(it.ma_hang) && it.don_gia > 0 && it.don_gia <= cap);
     if (!cands.length) return [];
 
-    // Sắp xếp ỔN ĐỊNH: theo nhóm (id_nhom) rồi đơn giá giảm dần; trong cùng giá thì theo mã (cho cố định)
-    cands = cands.sort((a, b) =>
-      String(a.id_nhom).localeCompare(String(b.id_nhom)) ||
-      (b.don_gia - a.don_gia) ||
-      String(a.ma_hang).localeCompare(String(b.ma_hang))
-    );
+    // Sắp xếp có XÁO TRỘN NHẸ (Debug 1): gán điểm = thứ tự gốc + nhiễu*jitter (theo hạt giống).
+    // jitter=0 -> giữ nguyên thứ tự tất định cũ; jitter>0 -> đa dạng mỗi lần đổi hạt giống.
+    cands = cands
+      .map(it => ({
+        it,
+        _base:
+          String(it.id_nhom).localeCompare('') * 0 // giữ chỗ, không ảnh hưởng
+      }))
+      .map((x, i) => x) // no-op để dễ đọc
+      .map(() => null)  // (sẽ thay bằng cách sắp xếp bên dưới)
+      .filter(Boolean); // dọn mảng tạm
+    // Sắp xếp thực tế: ưu tiên nhóm -> đơn giá giảm dần -> mã, NHƯNG cộng nhiễu ngẫu nhiên có kiểm soát.
+    cands = items
+      .filter(it => !used.has(it.ma_hang) && it.don_gia > 0 && it.don_gia <= cap)
+      .map(it => ({ it, r: rng() }))
+      .sort((a, b) => {
+        const ga = String(a.it.id_nhom), gb = String(b.it.id_nhom);
+        const gCmp = ga.localeCompare(gb);
+        if (gCmp !== 0) return gCmp;                       // vẫn gom theo nhóm trước
+        const priceCmp = (b.it.don_gia - a.it.don_gia);    // đơn giá cao trước
+        // nhiễu: đẩy/kéo nhẹ theo hạt giống để đổi thứ tự khi giá xấp xỉ nhau
+        const noise = (a.r - b.r) * jitter * Math.max(1, b.it.don_gia + a.it.don_gia);
+        const mixed = priceCmp + noise;
+        if (Math.abs(mixed) > 1e-9) return mixed;
+        return String(a.it.ma_hang).localeCompare(String(b.it.ma_hang));
+      })
+      .map(x => x.it);
+    if (!cands.length) return [];
 
     const lines = [];
     const groupsUsed = new Set();

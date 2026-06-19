@@ -2352,6 +2352,9 @@
             <input type="range" id="ag_fr" min="60" max="100" value="92" oninput="document.getElementById('ag_fr_lbl').textContent=this.value+'%'"></label>
           <label class="col-2">Mức tỷ lệ cho phép trùng mặt hàng: <b id="ag_dup_lbl">0%</b>
             <input type="range" id="ag_dup" min="0" max="100" value="0" oninput="document.getElementById('ag_dup_lbl').textContent=this.value+'%'"></label>
+          <label class="col-2">🎲 Hạt giống xáo trộn (để trống = mỗi lần một phương án)
+            <input id="ag_seed" type="number" placeholder="Bỏ trống để ngẫu nhiên — hoặc nhập số cố định (vd 12345) để tái lập">
+          </label>
         </div>
         <div class="alert sm">Hệ thống sẽ tự chọn vật tư, cân số lượng nguyên dương, và tách thành nhiều đơn sao cho mỗi đơn nằm trong [min, max] và tổng ≤ ngân sách kế hoạch.</div>`,
       foot: [
@@ -2403,9 +2406,11 @@
         onlyDeHuHong: $('#ag_dehu').checked,
         fillRatio: Number($('#ag_fr').value) / 100,
         dupRatio: Number($('#ag_dup').value) / 100,  // Debug 4: tỷ lệ cho phép trùng kỳ trước
+        seed: ($('#ag_seed') && $('#ag_seed').value.trim() !== '') ? Number($('#ag_seed').value) : null, // Debug 1: hạt giống
       },
     };
 
+    AppState.cache.lastAutoParams = params; // Debug 1: nhớ cấu hình để nút "🔄 Sinh lại" dùng lại
     openModal({ title: 'Đang tạo đơn…', body: '<div class="loading">Đang cân đối ngân sách & sinh đơn…</div>', foot: [] });
     const result = useAI ? await window.API.autoGeneratePOsAI(params) : await window.API.autoGeneratePOs(params);
 
@@ -2442,12 +2447,33 @@
         <div class="alert" id="poEditSum"></div>`,
       foot: [
         { label: 'Hủy', class: 'btn-light', onClick: () => { AppState.poPreview = null; closeModal(); } },
-        { label: '🔄 Sinh lại', class: 'btn-light', onClick: openAutoGenerate },
+        { label: '🔄 Sinh lại', class: 'btn-light', onClick: () => regenerateAuto() },
         { label: '🤖 Phân tích bằng AI', class: 'btn-warn', onClick: () => runAiAnalyze() },
         { label: `✅ Xác nhận tạo đơn`, class: 'btn-primary', onClick: () => commitPOs() },
       ],
     });
     renderPreviewEditor();
+  }
+
+  // 🔄 Sinh lại ngay với HẠT GIỐNG MỚI (Debug 1): không mở lại form, dùng đúng cấu hình lần trước.
+  async function regenerateAuto() {
+    const last = AppState.cache.lastAutoParams;
+    if (!last) return openAutoGenerate(); // chưa có cấu hình -> mở form như cũ
+    // Đổi hạt giống: nếu lần trước người dùng nhập số cố định thì GIỮ (để tái lập);
+    // nếu để trống (null) thì sinh hạt giống mới ngẫu nhiên -> phương án mới.
+    const params = JSON.parse(JSON.stringify(last));
+    if (params.opts.seed == null) {
+      params.opts.seed = (Date.now() ^ Math.floor(Math.random() * 0xffffffff)) >>> 0;
+    }
+    openModal({ title: 'Đang sinh lại…', body: '<div class="loading">Đang đổi hạt giống & sinh phương án mới…</div>', foot: [] });
+    const result = await window.API.autoGeneratePOs(params);
+    if (!result.success) {
+      openModal({ title: '⚠️ Không tạo được', body: `<div class="alert alert-warn">${esc(result.error || 'Lỗi không xác định')}</div>`,
+        foot: [{ label: 'Quay lại', class: 'btn-light', onClick: openAutoGenerate }] });
+      return;
+    }
+    AppState.poPreview = result;
+    showAutoPreview(result, AppState.planDraft, AppState.cache.previewBudget);
   }
 
   // Gọi AI phân tích các đơn đang xem trước, hiển thị kết quả ngay trong modal
