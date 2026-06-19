@@ -159,12 +159,44 @@ window.API = (function () {
   /* -------------------- 8. CRUD DATA (vật tư) -------------------- */
   const listData = () => getAll(S.DATA);
   const getDataItem = (ma) => get(S.DATA, ma);
+  // Lưu / cập nhật 1 mặt hàng (tự enrich để có _ck_min/_ck_max/_gia_min/_gia_max)
+  async function saveDataItem(item) {
+    return put(S.DATA, enrichItem(item));
+  }
+  // Xóa 1 mặt hàng theo mã
+  const deleteDataItem = (ma) => del(S.DATA, ma);
+
   const listNCC = () => getAll(S.NCC);
   const listNhom = () => getAll(S.NHOM);
+  const getNhom = (id) => get(S.NHOM, id);
+  // Lưu / cập nhật 1 nhóm phụ trách
+  async function saveNhom(o) {
+    if (!o.id_nhom) {
+      // sinh id_nhom kế tiếp dạng NHxx
+      const all = await getAll(S.NHOM);
+      let max = 0; all.forEach(n => { const m = /NH(\d+)/.exec(n.id_nhom); if (m) max = Math.max(max, +m[1]); });
+      o.id_nhom = 'NH' + String(max + 1).padStart(2, '0');
+    }
+    return put(S.NHOM, o);
+  }
+  // Xóa 1 nhóm — chặn nếu còn vật tư thuộc nhóm này
+  async function deleteNhom(id_nhom) {
+    const items = await getByIndex(S.DATA, 'id_nhom', id_nhom);
+    if (items.length) throw new Error(`Không thể xóa: còn ${items.length} vật tư thuộc nhóm này.`);
+    return del(S.NHOM, id_nhom);
+  }
+  // Đếm số vật tư theo từng nhóm (phục vụ hiển thị)
+  async function countItemsByNhom() {
+    const all = await getAll(S.DATA);
+    const map = {};
+    all.forEach(it => { map[it.id_nhom] = (map[it.id_nhom] || 0) + 1; });
+    return map;
+  }
 
   /* -------------------- 9. CRUD ĐƠN HÀNG + CHI TIẾT -------------------- */
   async function saveDonHang(po) {
-    if (!po.id_don_hang) { po.id_don_hang = uuid(); po.ngay_tao = nowStr(); }
+    if (!po.id_don_hang) po.id_don_hang = uuid();
+    if (!po.ngay_tao) po.ngay_tao = nowStr();   // luôn đảm bảo có ngày tạo
     po.ngay_cap_nhat_trang_thai = nowStr();
     return put(S.DON_HANG, po);
   }
@@ -398,23 +430,45 @@ window.API = (function () {
   /* -------------------- 13. THANH TOÁN & CÔNG NỢ (Bước 5) -------------------- */
   async function saveThanhToan(tt) {
     if (!tt.id_thanh_toan) tt.id_thanh_toan = uuid();
+    if (!tt.ngay_tao) tt.ngay_tao = nowStr();
     await put(S.THANH_TOAN, tt);
-    // tính lại công nợ & cập nhật trạng thái
-    const po = await getDonHang(tt.id_don_hang);
-    const list = await getByIndex(S.THANH_TOAN, 'id_don_hang', tt.id_don_hang);
-    const paid = list.reduce((a, b) => a + (Number(b.so_tien_thanh_toan) || 0), 0);
-    if (paid >= po.gia_tri_don_hang) {
-      if (C.PO_FLOW[po.trang_thai]?.includes(C.PO_STATUS.DA_THANH_TOAN) || po.trang_thai === C.PO_STATUS.TT_MOT_PHAN)
-        await changePoStatusForce(po.id_don_hang, C.PO_STATUS.DA_THANH_TOAN);
-    } else if (paid > 0 && po.trang_thai === C.PO_STATUS.DA_XUAT_HD) {
-      await changePoStatusForce(po.id_don_hang, C.PO_STATUS.TT_MOT_PHAN);
-    }
-    return { paid, remaining: po.gia_tri_don_hang - paid };
+    // Tính lại công nợ & trạng thái đơn (dùng chung cho cả thêm & sửa)
+    return recalcCongNoStatus(tt.id_don_hang);
   }
   async function changePoStatusForce(id, st) {
     const po = await getDonHang(id); po.trang_thai = st; return saveDonHang(po);
   }
   const listThanhToanByDon = (id) => getByIndex(S.THANH_TOAN, 'id_don_hang', id);
+  // Lấy 1 giao dịch thanh toán theo id (Debug: sửa/xem)
+  const getThanhToan = (id) => get(S.THANH_TOAN, id);
+  // Xóa 1 giao dịch thanh toán + tính lại công nợ & trạng thái đơn
+  async function deleteThanhToan(id_thanh_toan) {
+    const tt = await get(S.THANH_TOAN, id_thanh_toan);
+    if (!tt) throw new Error('Không tìm thấy giao dịch thanh toán');
+    const id_don_hang = tt.id_don_hang;
+    await del(S.THANH_TOAN, id_thanh_toan);
+    await recalcCongNoStatus(id_don_hang);
+    return true;
+  }
+  // Tính lại trạng thái thanh toán của đơn dựa trên tổng đã trả hiện tại
+  async function recalcCongNoStatus(id_don_hang) {
+    const po = await getDonHang(id_don_hang);
+    if (!po) return;
+    const list = await getByIndex(S.THANH_TOAN, 'id_don_hang', id_don_hang);
+    const paid = list.reduce((a, b) => a + (Number(b.so_tien_thanh_toan) || 0), 0);
+    let st = po.trang_thai;
+    if (paid >= po.gia_tri_don_hang && po.gia_tri_don_hang > 0) {
+      st = C.PO_STATUS.DA_THANH_TOAN;
+    } else if (paid > 0) {
+      st = C.PO_STATUS.TT_MOT_PHAN;
+    } else {
+      // hết tiền đã trả -> quay lại "Đã xuất hóa đơn" (nếu trước đó đã ở giai đoạn thanh toán)
+      if ([C.PO_STATUS.TT_MOT_PHAN, C.PO_STATUS.DA_THANH_TOAN].includes(po.trang_thai))
+        st = C.PO_STATUS.DA_XUAT_HD;
+    }
+    if (st !== po.trang_thai) { po.trang_thai = st; await saveDonHang(po); }
+    return { paid, remaining: po.gia_tri_don_hang - paid };
+  }
   async function congNoByDon(id) {
     const po = await getDonHang(id);
     const list = await listThanhToanByDon(id);
@@ -425,13 +479,77 @@ window.API = (function () {
   /* -------------------- 14. SETTINGS (API key...) -------------------- */
   async function setSetting(key, value) { return put(S.SETTINGS, { key, value }); }
   async function getSetting(key) { const r = await get(S.SETTINGS, key); return r ? r.value : null; }
+  // Gọi Google API lấy danh sách model Gemini hỗ trợ generateContent (nút "Cập nhật model")
+  async function listGeminiModels(key) {
+    const url = `${C.AI.GEMINI.ENDPOINT}?key=${encodeURIComponent(key)}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('Gemini HTTP ' + res.status);
+    const data = await res.json();
+    return (data.models || [])
+      .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
+      .map(m => m.name.replace(/^models\//, ''))
+      .filter(n => /gemini/i.test(n))
+      .sort();
+  }
 
   /* -------------------- 15. TÍCH HỢP AI (tùy chọn) -------------------- */
+    // Gọi Gemini với 1 prompt văn bản, trả về text thuần (dùng chung cho phân tích/đề xuất)
+  async function geminiGenerate(prompt, key) {
+    const k = key || (await getSetting('gemini_key'));
+    if (!k) throw new Error('Chưa cấu hình Gemini API Key');
+    const model = (await getSetting('gemini_model')) || C.AI.GEMINI.MODEL;
+    const url = `${C.AI.GEMINI.ENDPOINT}/${model}:generateContent?key=${encodeURIComponent(k)}`;
+    const res = await fetch(url, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+    });
+    if (!res.ok) throw new Error('Gemini HTTP ' + res.status);
+    const data = await res.json();
+    return data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  }
+
+  // Phân tích bộ đơn hàng vừa tạo -> trả về nhận xét dạng text (markdown nhẹ)
+  async function analyzePurchaseOrders(purchase_orders, ctx) {
+    const summary = purchase_orders.map(po => ({
+      ma_don: po.ma_don_hang, ncc: po.id_ncc, gia_tri: po.gia_tri_don_hang,
+      so_dong: (po._lines || []).length,
+      mat_hang: (po._lines || []).map(l => `${l.ten_hang_hoa} x${l.so_luong} (${l.don_gia_thuc_te}đ)`),
+    }));
+    const prompt = `Bạn là chuyên gia mua sắm vật tư ngành cấp thoát nước. Hãy phân tích NGẮN GỌN bộ đơn đặt hàng sau (tiếng Việt).
+Bối cảnh: kỳ ${ctx?.thang_nam || ''}, ngân sách khả dụng ${ctx?.budget || 'N/A'}, mỗi đơn nên trong khoảng [${ctx?.minOrder || ''} ; ${ctx?.maxOrder || ''}] đồng, mỗi đơn 1 nhà cung cấp.
+Dữ liệu đơn (JSON): ${JSON.stringify(summary)}.
+Yêu cầu trả lời theo 3 mục, mỗi mục 2-4 gạch đầu dòng ngắn:
+1. ĐÁNH GIÁ CHUNG (mức độ hợp lý của phân bổ, cân đối giữa các NCC).
+2. CẢNH BÁO/RỦI RO (đơn quá nhỏ/quá lớn, mặt hàng đáng ngờ, thiếu đa dạng...).
+3. ĐỀ XUẤT CẢI THIỆN (cụ thể, khả thi).
+Tuyệt đối không bịa số liệu ngoài dữ liệu đã cho. Trả lời thuần văn bản, không kèm JSON.`;
+    return geminiGenerate(prompt, null);
+  }
+
+  // Đề xuất thông tin cho 1 vật tư MỚI dựa trên tên + nhóm -> trả về JSON các trường gợi ý
+  async function suggestNewItemFields({ ten_hang_hoa, ten_nhom, dvt, don_gia }) {
+    const prompt = `Bạn là chuyên gia vật tư ngành cấp thoát nước. Với mặt hàng MỚI sau, hãy đề xuất các thông tin còn thiếu.
+Tên hàng: "${ten_hang_hoa}". Nhóm hàng: "${ten_nhom || ''}". ĐVT: "${dvt || ''}". Đơn giá tham khảo: ${don_gia || 'chưa rõ'} đồng.
+Hãy trả về DUY NHẤT một JSON đúng định dạng (không thêm chữ nào khác):
+{
+  "gia_thi_truong": "min - max" (khoảng giá thị trường hợp lý theo đồng VN, ví dụ "80000 - 130000"),
+  "muc_dich_su_dung": "mô tả ngắn mục đích sử dụng",
+  "muc_do_hu_hong": một trong ["Dễ hư hỏng","Trung bình","Bền"],
+  "chu_ky_thay_the": dạng "1 tháng" hoặc "từ 3 đến 6 tháng",
+  "phan_loai_chi_phi": một trong ["Chi phí vật tư dụng cụ","Chi phí máy móc thiết bị","Chi phí dịch vụ"]
+}`;
+    const txt = await geminiGenerate(prompt, null);
+    const m = txt.match(/\{[\s\S]*\}/);
+    if (!m) throw new Error('AI không trả về dữ liệu hợp lệ');
+    return JSON.parse(m[0]);
+  }
+
   async function geminiRerank(base, candidates, key) {
     const prompt = `Bạn là chuyên gia mua sắm vật tư cấp thoát nước. Mặt hàng cần thay thế: "${base.ten_hang_hoa}" (mục đích: ${base.muc_dich_su_dung}, đơn giá ${base.don_gia}).
 Danh sách ứng viên (JSON): ${JSON.stringify(candidates.map(c => ({ ma_hang: c.ma_hang, ten: c.ten_hang_hoa, gia: c.don_gia, muc_dich: c.muc_dich_su_dung })))}.
 Hãy chọn và sắp xếp tối đa 3 mã phù hợp nhất. CHỈ trả JSON mảng các ma_hang, ví dụ ["X","Y"].`;
-    const url = `${C.AI.GEMINI.ENDPOINT}/${C.AI.GEMINI.MODEL}:generateContent?key=${encodeURIComponent(key)}`;
+    const model = (await getSetting('gemini_model')) || C.AI.GEMINI.MODEL;
+    const url = `${C.AI.GEMINI.ENDPOINT}/${model}:generateContent?key=${encodeURIComponent(key)}`;
     const res = await fetch(url, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
@@ -465,8 +583,8 @@ Hãy chọn và sắp xếp tối đa 3 mã phù hợp nhất. CHỈ trả JSON 
 
   async function aiStatus() {
     const g = await getSetting('gemini_key');
-    const n = await getSetting('nvidia_key');
-    return { gemini: !!g, nvidia: !!n, mode: (g || n) ? 'Cloud AI' : 'Nội bộ' };
+    const model = (await getSetting('gemini_model')) || C.AI.GEMINI.MODEL;
+    return { gemini: !!g, nvidia: false, model, mode: g ? 'Gemini AI' : 'Nội bộ' };
   }
 
   /* -------------------- 16. BACKUP / RESTORE (R-04) -------------------- */
@@ -502,6 +620,8 @@ Hãy chọn và sắp xếp tối đa 3 mã phù hợp nhất. CHỈ trả JSON 
     maxOrder = maxOrder ?? C.ORDER_CONSTRAINTS.MAX_ORDER;
     opts = opts || {};
     const fillRatio = Math.min(1, Math.max(0.5, opts.fillRatio || 0.92));
+    // Tỷ lệ cho phép trùng mặt hàng so với các kỳ TRƯỚC (0 = chặn tuyệt đối; 1 = cho trùng thoải mái)
+    const dupRatio = Math.min(1, Math.max(0, opts.dupRatio != null ? opts.dupRatio : 0));
 
     if (!budget || budget < minOrder)
       return { success: false, error: `Ngân sách ${fmt(budget)} nhỏ hơn giá trị tối thiểu 1 đơn ${fmt(minOrder)}.`, purchase_orders: [] };
@@ -518,25 +638,48 @@ Hãy chọn và sắp xếp tối đa 3 mã phù hợp nhất. CHỈ trả JSON 
     const lastBuyMap = await getLastPurchaseBeforeMonth(thang_nam);
 
     let pool = await listData();
-    const warnItems = []; // gom cảnh báo chu kỳ để hiện cho người dùng
+    const warnItems = [];        // cảnh báo chu kỳ
+    const blockedByDup = [];     // các mã bị loại do trùng kỳ trước (ứng viên cho "tỷ lệ cho phép trùng")
     pool = pool.filter(it => {
       if (nccSet.length  && !nccSet.includes(C.GROUP_TO_NCC[it.ma_nhom])) return false;
       if (nhomSet.length && !nhomSet.includes(it.id_nhom)) return false;
       if (opts.onlyDeHuHong && it.muc_do_hu_hong !== 'Dễ hư hỏng') return false;
       if (it.don_gia <= 0) return false;
-      // (a) Loại trừ cứng: đã có đơn trong tháng này -> KHÔNG lấy lại
+      // (a) Loại trừ cứng: đã có đơn trong CÙNG tháng này -> không lấy lại
       if (purchasedThisMonth.has(it.ma_hang)) return false;
-      // (b) Cảnh báo mềm: kỳ trước vừa mua mà chưa tới chu kỳ thay thế tối thiểu
+
+      // (b) Tra soát các KỲ TRƯỚC: nếu đã mua mà CHƯA tới chu kỳ thay thế tối thiểu -> LOẠI,
+      //     TRỪ KHI là hàng "Dễ hư hỏng" (được mua lại tự do).
       const last = lastBuyMap[it.ma_hang];
-      if (last) {
+      const ckMin = (it._ck_min != null) ? it._ck_min : (parseChuKy(it.chu_ky_thay_the)[0] || 0);
+      const deHuHong = it.muc_do_hu_hong === 'Dễ hư hỏng';
+      if (last && !deHuHong) {
         const months = monthsBetweenYM(last.thang, thang_nam);
-        const ckMin = (it._ck_min != null) ? it._ck_min : (parseChuKy(it.chu_ky_thay_the)[0] || 0);
         if (ckMin > 0 && months < ckMin) {
-          warnItems.push(`⚠️ ${it.ten_hang_hoa} (${it.ma_hang}): mua kỳ ${last.thang}, chu kỳ thay thế tối thiểu ${ckMin} tháng — chỉ mới ${months} tháng. Vẫn lấy nhưng nên cân nhắc.`);
+          // Mặt hàng "trùng kỳ trước, chưa tới chu kỳ" -> tạm loại; có thể được nới theo dupRatio
+          blockedByDup.push(it);
+          warnItems.push(`⏳ ${it.ten_hang_hoa} (${it.ma_hang}): mua kỳ ${last.thang}, chu kỳ tối thiểu ${ckMin} tháng — mới ${months} tháng. Đã loại để tránh trùng.`);
+          return false;
         }
       }
       return true;
     });
+
+    // (c) Nới "tỷ lệ cho phép trùng": cho phép thêm lại một phần mặt hàng đã bị loại do trùng kỳ trước
+    if (dupRatio > 0 && blockedByDup.length) {
+      const allowCount = Math.round(blockedByDup.length * dupRatio);
+      if (allowCount > 0) {
+        // ưu tiên cho phép lại các mặt hàng gần tới chu kỳ nhất (months/ckMin lớn nhất)
+        const ranked = blockedByDup.map(it => {
+          const last = lastBuyMap[it.ma_hang];
+          const months = monthsBetweenYM(last.thang, thang_nam);
+          const ckMin = (it._ck_min != null) ? it._ck_min : (parseChuKy(it.chu_ky_thay_the)[0] || 1);
+          return { it, ratio: months / Math.max(1, ckMin) };
+        }).sort((a, b) => b.ratio - a.ratio).slice(0, allowCount);
+        ranked.forEach(x => pool.push(x.it));
+        warnItems.push(`🔁 Đã cho phép trùng lại ${ranked.length}/${blockedByDup.length} mặt hàng theo tỷ lệ ${(dupRatio * 100).toFixed(0)}%.`);
+      }
+    }
     if (!pool.length) return { success: false, error: 'Không có vật tư phù hợp (có thể tất cả đã lên đơn trong kỳ này).', purchase_orders: [] };
 
     // 2) Gom pool theo NCC (mỗi PO chỉ 1 NCC — Supplier Isolation)
@@ -557,6 +700,7 @@ Hãy chọn và sắp xếp tối đa 3 mã phù hợp nhất. CHỈ trả JSON 
     const warnings_general = [];
     let remaining = budget;
     let nccIdx = 0;
+    const usedMaHang = new Set(); // Mỗi mã hàng chỉ dùng 1 lần trong CẢ đợt (chống trùng giữa các đơn)
 
     // 4) Vòng lặp tạo đơn cho tới khi hết ngân sách / không thể tạo thêm
     let guard = 0;
@@ -564,17 +708,21 @@ Hãy chọn và sắp xếp tối đa 3 mã phù hợp nhất. CHỈ trả JSON 
       guard++;
       const ncc = nccKeys[nccIdx % nccKeys.length];
       nccIdx++;
-      const items = poolByNcc[ncc];
-      if (!items || !items.length) {
-        if (nccIdx % nccKeys.length === 0) break; // đã quay 1 vòng không tạo được gì
-        continue;
-      }
+      const items = (poolByNcc[ncc] || []).filter(it => !usedMaHang.has(it.ma_hang));
+      // Nếu tất cả NCC đều đã cạn vật tư chưa-dùng -> dừng
+      const conHang = nccKeys.some(k => (poolByNcc[k] || []).some(it => !usedMaHang.has(it.ma_hang)));
+      if (!conHang) break;
+      if (!items.length) continue;
       // mục tiêu cho đơn này: không vượt phần ngân sách còn lại, không vượt max
       const cap = Math.min(maxOrder, remaining);
       if (cap < minOrder) break;
       const aim = Math.min(targetPerPO, cap);
-      const lines = packOnePO(items, aim, minOrder, cap);
-      if (!lines.length) { continue; }
+      const lines = packOnePO(items, aim, minOrder, cap, usedMaHang);
+      if (!lines.length) {
+        // NCC này đã hết vật tư chưa-dùng đủ tạo đơn -> loại khỏi vòng xoay để tránh lặp vô ích
+        poolByNcc[ncc] = [];
+        continue;
+      }
       const val = lines.reduce((a, l) => a + l.thanh_tien, 0);
       if (val < minOrder) {
         // không đạt min -> bỏ qua NCC này lần này
@@ -609,23 +757,38 @@ Hãy chọn và sắp xếp tối đa 3 mã phù hợp nhất. CHỈ trả JSON 
     };
   }
 
-  // Đóng gói 1 PO: chọn vật tư & cân số lượng nguyên để giá trị ~ aim, trong [floorMin, cap]
-  function packOnePO(items, aim, floorMin, cap) {
-    // xáo trộn nhẹ để các đơn khác nhau, ưu tiên đa dạng nhóm
-    const shuffled = items.slice().sort(() => Math.random() - 0.5);
+  // Đóng gói 1 PO: chọn vật tư & cân số lượng nguyên để giá trị ~ aim, trong [floorMin, cap].
+  // KHÔNG random. Mỗi mã hàng chỉ dùng 1 lần trong cả đợt nhờ Set "used".
+  // Quy tắc chọn (deterministic):
+  //   1) Bỏ qua mã đã dùng (used) và mã có giá > cap.
+  //   2) Ưu tiên đa dạng NHÓM HÀNG (mỗi đơn cố gắng gồm nhiều nhóm khác nhau).
+  //   3) Trong cùng nhóm, ưu tiên đơn giá lớn trước để lấp đầy nhanh, gọn dòng.
+  function packOnePO(items, aim, floorMin, cap, used) {
+    used = used || new Set();
+    // Lọc ứng viên: chưa dùng, giá hợp lệ
+    let cands = items.filter(it => !used.has(it.ma_hang) && it.don_gia > 0 && it.don_gia <= cap);
+    if (!cands.length) return [];
+
+    // Sắp xếp ỔN ĐỊNH: theo nhóm (id_nhom) rồi đơn giá giảm dần; trong cùng giá thì theo mã (cho cố định)
+    cands = cands.sort((a, b) =>
+      String(a.id_nhom).localeCompare(String(b.id_nhom)) ||
+      (b.don_gia - a.don_gia) ||
+      String(a.ma_hang).localeCompare(String(b.ma_hang))
+    );
+
     const lines = [];
+    const groupsUsed = new Set();
     let sum = 0;
-    // chọn 3–6 mặt hàng
-    const wantLines = 3 + Math.floor(Math.random() * 4);
-    for (const it of shuffled) {
-      if (lines.length >= wantLines) break;
-      if (sum >= aim) break;
+    const wantLines = 5; // mục tiêu ~5 dòng/đơn (sẽ dừng sớm nếu đã đạt aim)
+
+    // Lượt 1: mỗi nhóm lấy tối đa 1 món (đa dạng nhóm), đơn giá cao trước
+    for (const it of cands) {
+      if (lines.length >= wantLines || sum >= aim) break;
+      if (groupsUsed.has(it.id_nhom)) continue;
       const price = it.don_gia;
-      if (price <= 0 || price > cap) continue;
       const room = Math.min(aim, cap) - sum;
       if (room < price) continue;
-      let qty = Math.max(1, Math.round(room / price / Math.max(1, wantLines - lines.length)));
-      // không để 1 dòng vượt cap
+      let qty = Math.max(1, Math.floor(room / price / Math.max(1, wantLines - lines.length)));
       while (qty > 1 && (sum + qty * price) > cap) qty--;
       if (qty < 1) qty = 1;
       const thanh_tien = qty * price;
@@ -635,16 +798,44 @@ Hãy chọn và sắp xếp tối đa 3 mã phù hợp nhất. CHỈ trả JSON 
         id_nhom: it.id_nhom, phan_loai_nhom_hang: it.phan_loai_nhom_hang, ma_nhom: it.ma_nhom,
         so_luong: qty, don_gia_thuc_te: price, thanh_tien,
       });
+      used.add(it.ma_hang);
+      groupsUsed.add(it.id_nhom);
       sum += thanh_tien;
     }
-    // nếu chưa đạt min, tăng số lượng dòng đầu tiên cho tới khi đạt min (không vượt cap)
+
+    // Lượt 2: nếu chưa đạt aim, bổ sung thêm bất kỳ món chưa dùng (kể cả trùng nhóm)
+    for (const it of cands) {
+      if (sum >= aim || lines.length >= wantLines + 3) break;
+      if (used.has(it.ma_hang)) continue;
+      const price = it.don_gia;
+      const room = Math.min(aim, cap) - sum;
+      if (room < price) continue;
+      let qty = 1;
+      while ((sum + (qty + 1) * price) <= Math.min(aim, cap)) qty++;
+      const thanh_tien = qty * price;
+      if (sum + thanh_tien > cap) continue;
+      lines.push({
+        ma_hang: it.ma_hang, ten_hang_hoa: it.ten_hang_hoa, dvt: it.dvt,
+        id_nhom: it.id_nhom, phan_loai_nhom_hang: it.phan_loai_nhom_hang, ma_nhom: it.ma_nhom,
+        so_luong: qty, don_gia_thuc_te: price, thanh_tien,
+      });
+      used.add(it.ma_hang);
+      sum += thanh_tien;
+    }
+
+    // Nếu chưa đạt min: tăng số lượng dòng đầu tiên cho tới khi đạt min (không vượt cap)
     if (sum < floorMin && lines.length) {
       const l0 = lines[0];
       while (sum < floorMin && (sum + l0.don_gia_thuc_te) <= cap) {
         l0.so_luong += 1; l0.thanh_tien += l0.don_gia_thuc_te; sum += l0.don_gia_thuc_te;
       }
     }
-    if (sum < floorMin) return []; // không đạt min -> bỏ
+
+    // Không đạt min -> trả mảng rỗng VÀ nhả lại các mã đã dùng (để đợt sau còn dùng được)
+    if (sum < floorMin) {
+      lines.forEach(l => used.delete(l.ma_hang));
+      return [];
+    }
     return lines;
   }
 
@@ -740,7 +931,8 @@ Hãy chọn và sắp xếp tối đa 3 mã phù hợp nhất. CHỈ trả JSON 
     openDB, seedIfEmpty, uuid, nowStr, todayStr, fmt,
     parseChuKy, parseGiaThiTruong, enrichItem,
     // data gốc
-    listData, getDataItem, listNCC, listNhom,
+    listData, getDataItem, saveDataItem, deleteDataItem, listNCC, listNhom,
+    getNhom, saveNhom, deleteNhom, countItemsByNhom,
     // công trình
     saveCongTrinh, listCongTrinh, getCongTrinh, delCongTrinh,
     // kế hoạch
@@ -756,8 +948,10 @@ Hãy chọn và sắp xếp tối đa 3 mã phù hợp nhất. CHỈ trả JSON 
     buildPurchaseOrders, suggestSubstitutes, suggestFillItems,
     // thanh toán
     saveThanhToan, listThanhToanByDon, congNoByDon,
+    getThanhToan, deleteThanhToan, recalcCongNoStatus,
     // settings + AI
-    setSetting, getSetting, aiStatus, nvidiaOptimize,
+    setSetting, getSetting, aiStatus, nvidiaOptimize, listGeminiModels,
+    geminiGenerate, analyzePurchaseOrders, suggestNewItemFields,
     // backup
     exportBackup, importBackup,
     

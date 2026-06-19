@@ -75,6 +75,7 @@
     thanhtoan: { title: 'Thanh toán & Công nợ', render: renderThanhToan },
     danhmuc:   { title: 'Danh mục vật tư', render: renderDanhMuc },
     ncc:       { title: 'Nhà cung cấp', render: renderNCC },
+    nhom:      { title: 'Nhóm phụ trách', render: renderNhom },
     baocao:    { title: 'Báo cáo', render: renderBaoCao },
     caidat:    { title: 'Cài đặt & Sao lưu', render: renderCaiDat },
   };
@@ -649,6 +650,13 @@
    * ==================================================================== */
   async function renderDonHang() {
     toolbarBtn('📊 Xuất Excel theo kỳ', 'btn-primary', () => openExportPeriod());
+    toolbarBtn('⬇️ Template đơn (xlsx)', 'btn-light', () => downloadPoTemplate());
+    toolbarBtn('📥 Nhập đơn từ Excel', 'btn-warn', () => {
+      const inp = document.createElement('input');
+      inp.type = 'file'; inp.accept = '.xlsx,.xls';
+      inp.onchange = (e) => importPoFromExcel(e.target.files[0]);
+      inp.click();
+    });
     const [dhs, khs, cts] = await Promise.all([
       window.API.listDonHang(), window.API.listKeHoach(), window.API.listCongTrinh(),
     ]);
@@ -686,12 +694,16 @@
             <td>${esc(d.id_ncc)}</td>
             <td>${fmt(d.gia_tri_don_hang)}</td>
             <td>${statusBadge(d.trang_thai)}</td>
-            <td>${esc((d.ngay_tao || '').slice(0, 16))}</td>
+            <td>${esc((d.ngay_tao || '').slice(0, 10))}</td>
               <td class="act">
               <button class="ibtn ibtn-primary" data-view="${d.id_don_hang}" title="Chi tiết">👁️</button>
               ${[C.PO_STATUS.NHAP, C.PO_STATUS.DA_GUI].includes(d.trang_thai)
                 ? `<button class="ibtn ibtn-warn" data-editpo="${d.id_don_hang}" title="Sửa đơn">✏️</button>` : ''}
-              <button class="ibtn" data-pdf="${d.id_don_hang}" title="In PDF">🖨️</button>
+              <button class="ibtn" data-pdf="${d.id_don_hang}" title="In Đơn đặt hàng (PDF)">🖨️</button>
+              ${[C.PO_STATUS.DA_GIAO, C.PO_STATUS.DA_XUAT_HD, C.PO_STATUS.TT_MOT_PHAN, C.PO_STATUS.DA_THANH_TOAN].includes(d.trang_thai)
+                ? `<button class="ibtn" data-pgn="${d.id_don_hang}" title="In Phiếu giao nhận (PDF)">📋</button>` : ''}
+              ${d.trang_thai === C.PO_STATUS.DA_THANH_TOAN
+                ? `<button class="ibtn" data-pchi="${d.id_don_hang}" title="In Phiếu chi / Ủy nhiệm chi (PDF)">🧾</button>` : ''}
               <button class="ibtn" data-xls="${d.id_don_hang}" title="Xuất Excel">📤</button>
               ${C.PO_NO_DELETE_FROM.includes(d.trang_thai) ? '' : `<button class="ibtn ibtn-danger" data-del="${d.id_don_hang}" title="Xóa">🗑️</button>`}
             </td>
@@ -704,6 +716,12 @@
       $$('[data-editpo]', view()).forEach(b => b.onclick = () => openPoEditor(b.dataset.editpo));
 
       $$('[data-pdf]', view()).forEach(b => b.onclick = () => printPO(b.dataset.pdf));
+
+
+      $$('[data-pgn]', view()).forEach(b => b.onclick = () => printPhieuGiaoNhan(b.dataset.pgn));
+
+
+      $$('[data-pchi]', view()).forEach(b => b.onclick = () => printPhieuChi(b.dataset.pchi));
 
       $$('[data-xls]', view()).forEach(b => b.onclick = () => exportPoExcel(b.dataset.xls));
 
@@ -718,6 +736,126 @@
    *  DEBUG 4 — XUẤT EXCEL THEO KỲ: chọn tháng -> mỗi NCC 1 sheet,
    *  gộp tất cả đơn của NCC đó trong tháng vào CÙNG 1 sheet (không tách).
    * ==================================================================== */
+    /* ====================================================================
+   *  IMPORT ĐƠN ĐẶT HÀNG TỪ EXCEL — Template + Nhập
+   * ==================================================================== */
+  // Tải file template Excel cho đơn đặt hàng (2 sheet: Hướng dẫn + Dữ liệu)
+  function downloadPoTemplate() {
+    const wb = XLSX.utils.book_new();
+
+    // --- Sheet 1: Hướng dẫn ---
+    const guide = [
+      ['HƯỚNG DẪN NHẬP ĐƠN ĐẶT HÀNG TỪ EXCEL'],
+      [''],
+      ['1. Nhập dữ liệu vào sheet "DonHang" theo đúng tên cột (không đổi tên cột, không xóa dòng tiêu đề).'],
+      ['2. Mỗi DÒNG là 1 mặt hàng. Các dòng có cùng "ma_don_hang" sẽ được gom vào CÙNG một đơn hàng.'],
+      ['3. Các cột bắt buộc: ma_don_hang, id_ncc, ma_hang, ten_hang_hoa, dvt, so_luong, don_gia_thuc_te.'],
+      ['4. id_ncc phải là 1 trong các mã NCC hợp lệ (xem sheet "DanhMucNCC").'],
+      ['5. ma_hang nên trùng với danh mục vật tư đã có; nếu là mã mới, vẫn nhập đầy đủ tên & ĐVT & đơn giá.'],
+      ['6. thang_nam (YYYY-MM) dùng để sinh mã đơn nếu ma_don_hang để trống; nên điền để gom đúng kỳ.'],
+      ['7. so_luong là số nguyên dương; don_gia_thuc_te là số (đồng), không nhập dấu chấm/phẩy ngăn cách.'],
+      ['8. Đơn nhập vào sẽ ở trạng thái "Nháp", bạn có thể chỉnh sửa lại sau khi import.'],
+      [''],
+      ['Cột', 'Ý nghĩa', 'Bắt buộc', 'Ví dụ'],
+      ['ma_don_hang', 'Mã đơn (để trống = tự sinh theo kỳ + NCC)', 'Không', 'PO-202606-NCC001-001'],
+      ['thang_nam', 'Kỳ mua sắm (YYYY-MM)', 'Nên có', '2026-06'],
+      ['id_ncc', 'Mã nhà cung cấp', 'Có', 'NCC001'],
+      ['ma_hang', 'Mã hàng', 'Có', 'CDM-001'],
+      ['ten_hang_hoa', 'Tên hàng hóa', 'Có', 'Máy bơm chìm 3HP'],
+      ['dvt', 'Đơn vị tính', 'Có', 'Cái'],
+      ['so_luong', 'Số lượng (nguyên dương)', 'Có', '2'],
+      ['don_gia_thuc_te', 'Đơn giá (đồng)', 'Có', '12500000'],
+      ['ghi_chu', 'Ghi chú đơn (tùy chọn)', 'Không', 'Mua bổ sung'],
+    ];
+    const wsG = XLSX.utils.aoa_to_sheet(guide);
+    wsG['!cols'] = [{ wch: 22 }, { wch: 48 }, { wch: 10 }, { wch: 24 }];
+    wsG['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 3 } }];
+    XLSX.utils.book_append_sheet(wb, wsG, 'HuongDan');
+
+    // --- Sheet 2: DonHang (dữ liệu mẫu) ---
+    const header = ['ma_don_hang', 'thang_nam', 'id_ncc', 'ma_hang', 'ten_hang_hoa', 'dvt', 'so_luong', 'don_gia_thuc_te', 'ghi_chu'];
+    const sample = [
+      ['', '2026-06', 'NCC001', 'CDM-001', 'Máy bơm chìm nước thải 3HP', 'Cái', 1, 12500000, 'Đơn mẫu'],
+      ['', '2026-06', 'NCC001', 'CDM-003', 'Tụ điện khởi động 50µF', 'Cái', 4, 95000, ''],
+      ['', '2026-06', 'NCC005', 'BHL-001', 'Quần áo bảo hộ phản quang', 'Bộ', 10, 185000, ''],
+    ];
+    const wsD = XLSX.utils.aoa_to_sheet([header, ...sample]);
+    wsD['!cols'] = header.map(h => ({ wch: Math.max(14, h.length + 2) }));
+    XLSX.utils.book_append_sheet(wb, wsD, 'DonHang');
+
+    XLSX.writeFile(wb, 'Template_DonDatHang.xlsx');
+    toast('Đã tải template đơn đặt hàng', 'success');
+  }
+
+  // Nhập đơn đặt hàng từ file Excel template
+  function importPoFromExcel(file) {
+    if (!file) return;
+    const rd = new FileReader();
+    rd.onload = async () => {
+      try {
+        const wb = XLSX.read(rd.result, { type: 'array' });
+        const sheetName = wb.SheetNames.includes('DonHang') ? 'DonHang' : wb.SheetNames[0];
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { defval: '' });
+        if (!rows.length) return toast('File không có dữ liệu', 'error');
+
+        const nccs = await window.API.listNCC();
+        const nccIds = new Set(nccs.map(n => n.id_ncc));
+
+        // Gom dòng theo đơn: key = ma_don_hang (nếu có) hoặc thang_nam|id_ncc
+        const groups = {};
+        for (const r of rows) {
+          const id_ncc = String(r.id_ncc || '').trim();
+          if (!id_ncc || !nccIds.has(id_ncc)) continue; // bỏ dòng NCC không hợp lệ
+          if (!r.ma_hang && !r.ten_hang_hoa) continue;
+          const thang = String(r.thang_nam || new Date().toISOString().slice(0, 7)).trim();
+          const maDon = String(r.ma_don_hang || '').trim();
+          const key = maDon || `${thang}__${id_ncc}`;
+          (groups[key] = groups[key] || { ma_don_hang: maDon, thang_nam: thang, id_ncc, ghi_chu: '', lines: [] });
+          if (r.ghi_chu) groups[key].ghi_chu = String(r.ghi_chu);
+          groups[key].lines.push({
+            ma_hang: String(r.ma_hang || '').trim(),
+            ten_hang_hoa: String(r.ten_hang_hoa || '').trim(),
+            dvt: String(r.dvt || '').trim(),
+            so_luong: Math.max(1, Math.round(Number(r.so_luong) || 1)),
+            don_gia_thuc_te: Math.max(0, Number(r.don_gia_thuc_te) || 0),
+          });
+        }
+
+        const keys = Object.keys(groups);
+        if (!keys.length) return toast('Không có dòng hợp lệ (kiểm tra id_ncc & mặt hàng)', 'error');
+
+        let created = 0;
+        for (const k of keys) {
+          const g = groups[k];
+          const lines = g.lines.filter(l => l.ten_hang_hoa && l.so_luong > 0);
+          if (!lines.length) continue;
+          lines.forEach(l => l.thanh_tien = l.so_luong * l.don_gia_thuc_te);
+          const giaTri = lines.reduce((a, l) => a + l.thanh_tien, 0);
+          const maDon = g.ma_don_hang || await window.API.buildPoCode(g.thang_nam, g.id_ncc);
+
+          const id_don_hang = window.API.uuid();
+          await window.API.saveDonHang({
+            id_don_hang, ma_don_hang: maDon, id_ke_hoach: null, id_ncc: g.id_ncc,
+            gia_tri_don_hang: giaTri, trang_thai: C.PO_STATUS.NHAP,
+            ngay_gui: null, ghi_chu: (g.ghi_chu ? g.ghi_chu + ' | ' : '') + '[Nhập từ Excel]',
+          });
+          for (const l of lines) {
+            await window.API.saveChiTiet({
+              id_don_hang, ma_hang: l.ma_hang || '(tùy chỉnh)', ten_hang_hoa: l.ten_hang_hoa,
+              dvt: l.dvt || '', so_luong: l.so_luong,
+              don_gia_de_xuat: l.don_gia_thuc_te, don_gia_thuc_te: l.don_gia_thuc_te,
+              thanh_tien: l.thanh_tien, ghi_chu_dong: '',
+            });
+          }
+          created++;
+        }
+        toast(`Đã nhập ${created} đơn hàng từ Excel`, 'success');
+        renderDonHang();
+      } catch (e) { toast('Lỗi đọc file: ' + e.message, 'error', 5000); }
+    };
+    rd.readAsArrayBuffer(file);
+  }
+
   async function openExportPeriod() {
     const dhs = (await window.API.listDonHang()).filter(d => d.trang_thai !== C.PO_STATUS.DA_HUY);
     // tập các tháng có đơn (lấy theo mã PO: PO-YYYYMM-... -> YYYY-MM)
@@ -894,7 +1032,7 @@
             <select id="pe_tt">${Object.values(C.PO_STATUS).map(s => `<option ${po.trang_thai === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
           </label>
           <label>Ngày tạo đơn
-            <input id="pe_ngay" type="datetime-local" value="${esc(toDatetimeLocal(po.ngay_tao))}">
+            <input id="pe_ngay" type="date" value="${esc(toDateOnly(po.ngay_tao))}">
           </label>
         </div>
         <div class="po-card" style="margin-top:14px">
@@ -931,6 +1069,11 @@
     if (!s) return '';
     const m = String(s).replace(' ', 'T');
     return m.slice(0, 16);
+  }
+  // Lấy chỉ phần ngày "YYYY-MM-DD" từ chuỗi ngày-giờ
+  function toDateOnly(s) {
+    if (!s) return '';
+    return String(s).slice(0, 10);
   }
   // Chuyển ngược lại để lưu
   function fromDatetimeLocal(s) {
@@ -1072,14 +1215,29 @@
       });
     }
 
-    // 7) Cập nhật đơn hàng (mã, NCC, giá trị)
+    // 7) Cập nhật đơn hàng (mã, NCC, giá trị, trạng thái, ngày tạo)
     const po = await window.API.getDonHang(E.id_don_hang);
     po.ma_don_hang = newMa;
     po.id_ncc = nccObj.id_ncc;
     po.gia_tri_don_hang = giaTri;
-    await window.API.saveDonHang(po);
 
-    closeModal(); toast('Đã lưu thay đổi đơn hàng', 'success'); renderDonHang();
+    // Trạng thái — gán trực tiếp (cho phép sửa tự do trong màn này)
+    const newTt = $('#pe_tt') ? $('#pe_tt').value : '';
+    if (newTt) po.trang_thai = newTt;
+
+    // Ngày tạo — chỉ lấy phần ngày, giữ phần giờ cũ nếu có (an toàn với undefined)
+    const newDate = $('#pe_ngay') ? ($('#pe_ngay').value || '') : '';
+    if (newDate) {
+      const old = po.ngay_tao || '';
+      const oldTime = (old.length > 10) ? old.slice(10) : ' 00:00:00';
+      po.ngay_tao = newDate + oldTime;
+    }
+    await window.API.saveDonHang(po);
+    // ✅ Đóng modal + làm mới danh sách sau khi lưu thành công
+    closeModal();
+    toast('Đã lưu thay đổi đơn hàng', 'success');
+    renderDonHang();
+
   }
 
   // So khớp NCC từ chuỗi nhập (ưu tiên "NCCxxx - tên", sau đó theo mã, theo tên gần đúng)
@@ -1174,6 +1332,117 @@
       }
     });
   }
+
+    /* -------------------- IN PHIẾU GIAO NHẬN (PDF qua window.print) -------------------- */
+  async function printPhieuGiaoNhan(id) {
+    const po = await window.API.getDonHang(id);
+    const cts = await window.API.listChiTietByDon(id);
+    const ncc = (await window.API.listNCC()).find(n => n.id_ncc === po.id_ncc) || {};
+    const kh = po.id_ke_hoach ? await window.API.getKeHoach(po.id_ke_hoach) : null;
+    const ct = kh ? await window.API.getCongTrinh(kh.id_cong_trinh) : null;
+
+    $('#printArea').innerHTML = `
+      <div class="print-doc">
+        <div class="print-title">PHIẾU GIAO NHẬN HÀNG HÓA</div>
+        <div class="print-sub">Số GN: ${esc(po.ma_don_hang)}-GN — Ngày giao: ${esc((po.ngay_tao || '').slice(0, 10))}</div>
+        <div class="print-meta">
+          <div><b>Bên giao (Nhà cung cấp):</b> ${esc(ncc.ten_ncc || po.id_ncc)}<br>
+            <b>Điện thoại:</b> ${esc(ncc.dien_thoai || '')}<br>
+            <b>Địa chỉ:</b> ${esc(ncc.dia_chi || '')}</div>
+          <div><b>Bên nhận (Công trình):</b> ${esc(ct ? ct.ten_cong_trinh : '')}<br>
+            <b>Địa điểm:</b> ${esc(ct ? ct.dia_diem : '')}<br>
+            <b>Tham chiếu đơn:</b> ${esc(po.ma_don_hang)}</div>
+        </div>
+        <table class="print-tbl">
+          <thead><tr><th>STT</th><th>Mã hàng</th><th>Tên hàng hóa</th><th>ĐVT</th><th>SL đặt</th><th>SL thực giao</th><th>Tình trạng</th></tr></thead>
+          <tbody>${cts.map((c, i) => `<tr><td>${i + 1}</td><td>${esc(c.ma_hang)}</td>
+            <td style="text-align:left">${esc(c.ten_hang_hoa)}</td><td>${esc(c.dvt)}</td>
+            <td>${c.so_luong}</td><td>${c.so_luong}</td><td></td></tr>`).join('')}</tbody>
+        </table>
+        <div class="alert sm" style="margin-top:8px">Ghi chú: Bên nhận kiểm tra số lượng, quy cách hàng hóa trước khi ký xác nhận.</div>
+        <div class="print-sign">
+          <div>Bên giao hàng<br><small>(Ký, ghi rõ họ tên)</small></div>
+          <div>Bên nhận hàng<br><small>(Ký, ghi rõ họ tên)</small></div>
+        </div>
+      </div>`;
+    document.body.classList.add('printing');
+    window.print();
+    setTimeout(() => document.body.classList.remove('printing'), 500);
+  }
+
+  /* -------------------- IN PHIẾU CHI / ỦY NHIỆM CHI (PDF qua window.print) -------------------- */
+  // Tự chọn loại chứng từ theo hình thức thanh toán: Tiền mặt -> Phiếu chi; Chuyển khoản -> Ủy nhiệm chi.
+  async function printPhieuChi(id) {
+    const po = await window.API.getDonHang(id);
+    const ncc = (await window.API.listNCC()).find(n => n.id_ncc === po.id_ncc) || {};
+    const list = await window.API.listThanhToanByDon(id);
+    if (!list.length) return toast('Đơn chưa có giao dịch thanh toán', 'error');
+
+    // Gom các giao dịch — phân loại theo hình thức để chọn mẫu chứng từ
+    const sortedList = list.slice().sort((a, b) => (a.ngay_thanh_toan || '').localeCompare(b.ngay_thanh_toan || ''));
+    const tongTien = sortedList.reduce((a, t) => a + (Number(t.so_tien_thanh_toan) || 0), 0);
+    const coTienMat = sortedList.some(t => t.hinh_thuc_thanh_toan === 'Tiền mặt');
+    const tieuDe = coTienMat && !sortedList.some(t => t.hinh_thuc_thanh_toan === 'Chuyển khoản')
+      ? 'PHIẾU CHI' : 'ỦY NHIỆM CHI';
+
+    const t0 = sortedList[sortedList.length - 1]; // giao dịch gần nhất làm đại diện ngày/HĐ
+    $('#printArea').innerHTML = `
+      <div class="print-doc">
+        <div class="print-title">${tieuDe}</div>
+        <div class="print-sub">Số: ${esc(po.ma_don_hang)}-CT — Ngày: ${esc(t0.ngay_thanh_toan || '')}</div>
+        <div class="print-meta">
+          <div><b>Đơn vị nhận tiền:</b> ${esc(ncc.ten_ncc || po.id_ncc)}<br>
+            <b>Điện thoại:</b> ${esc(ncc.dien_thoai || '')}<br>
+            <b>Địa chỉ:</b> ${esc(ncc.dia_chi || '')}</div>
+          <div><b>Tham chiếu đơn:</b> ${esc(po.ma_don_hang)}<br>
+            <b>Giá trị đơn:</b> ${fmt(po.gia_tri_don_hang)}<br>
+            <b>Số hóa đơn VAT:</b> ${esc(t0.so_hoa_don_ncc || '')}</div>
+        </div>
+        <table class="print-tbl">
+          <thead><tr><th>STT</th><th>Ngày TT</th><th>Số HĐ VAT</th><th>Hình thức</th><th>Người duyệt</th><th>Số tiền</th></tr></thead>
+          <tbody>${sortedList.map((t, i) => `<tr><td>${i + 1}</td><td>${esc(t.ngay_thanh_toan || '')}</td>
+            <td>${esc(t.so_hoa_don_ncc || '')}</td><td>${esc(t.hinh_thuc_thanh_toan || '')}</td>
+            <td>${esc(t.nguoi_duyet_thanh_toan || '')}</td><td>${fmt(t.so_tien_thanh_toan)}</td></tr>`).join('')}</tbody>
+          <tfoot><tr><td colspan="5" style="text-align:right"><b>TỔNG CHI</b></td><td><b>${fmt(tongTien)}</b></td></tr></tfoot>
+        </table>
+        <div class="print-amount-text">Số tiền viết bằng chữ: <i>${esc(docTienBangChu(tongTien))}</i></div>
+        <div class="print-sign">
+          <div>Người lập phiếu<br><small>(Ký, họ tên)</small></div>
+          <div>Kế toán trưởng<br><small>(Ký, họ tên)</small></div>
+          <div>Thủ trưởng đơn vị<br><small>(Ký, họ tên)</small></div>
+        </div>
+      </div>`;
+    document.body.classList.add('printing');
+    window.print();
+    setTimeout(() => document.body.classList.remove('printing'), 500);
+  }
+
+  /* -------------------- ĐỌC SỐ TIỀN BẰNG CHỮ (Tiếng Việt) -------------------- */
+  function docTienBangChu(soTien) {
+    soTien = Math.round(Number(soTien) || 0);
+    if (soTien === 0) return 'Không đồng';
+    const chuSo = ['không','một','hai','ba','bốn','năm','sáu','bảy','tám','chín'];
+    const docBaChuSo = (num, full) => {
+      let tram = Math.floor(num / 100), chuc = Math.floor((num % 100) / 10), donvi = num % 10, kq = '';
+      if (full || tram > 0) { kq += chuSo[tram] + ' trăm'; if (chuc === 0 && donvi > 0) kq += ' lẻ'; }
+      if (chuc > 1) { kq += ' ' + chuSo[chuc] + ' mươi'; if (donvi === 1) kq += ' mốt'; else if (donvi === 5) kq += ' lăm'; else if (donvi > 0) kq += ' ' + chuSo[donvi]; }
+      else if (chuc === 1) { kq += ' mười'; if (donvi === 5) kq += ' lăm'; else if (donvi > 0) kq += ' ' + chuSo[donvi]; }
+      else if (chuc === 0 && donvi > 0 && (full || tram > 0)) { kq += ' ' + chuSo[donvi]; }
+      else if (chuc === 0 && donvi > 0) { kq += chuSo[donvi]; }
+      return kq.trim();
+    };
+    const donVi = ['', ' nghìn', ' triệu', ' tỷ'];
+    let nhom = [], n = soTien;
+    while (n > 0) { nhom.push(n % 1000); n = Math.floor(n / 1000); }
+    let kq = '';
+    for (let i = nhom.length - 1; i >= 0; i--) {
+      if (nhom[i] === 0) continue;
+      kq += docBaChuSo(nhom[i], i < nhom.length - 1) + donVi[i] + ' ';
+    }
+    kq = kq.trim();
+    return kq.charAt(0).toUpperCase() + kq.slice(1) + ' đồng';
+  }
+
 
   /* -------------------- IN PDF (window.print + @media print) -------------------- */
   async function printPO(id) {
@@ -1307,44 +1576,64 @@
           <td>${fmt(cn.gia_tri)}</td><td>${fmt(cn.paid)}</td>
           <td class="${cn.remaining > 0 ? 'txt-danger' : 'txt-ok'}">${fmt(cn.remaining)}</td>
           <td>${statusBadge(d.trang_thai)}</td>
-          <td class="act"><button class="ibtn ibtn-primary" data-pay="${d.id_don_hang}" title="Ghi nhận thanh toán">💵</button>
-            <button class="ibtn" data-hist="${d.id_don_hang}" title="Lịch sử">📜</button></td>
+                    <td class="act"><button class="ibtn ibtn-primary" data-pay="${d.id_don_hang}" title="Ghi nhận thanh toán">💵</button>
+            <button class="ibtn" data-hist="${d.id_don_hang}" title="Xem / Sửa / Xóa giao dịch">📜</button></td>
         </tr>`).join('')}</tbody></table>`)}`;
+
 
 
     $$('[data-pay]', view()).forEach(b => b.onclick = () => payForm(b.dataset.pay));
 
+
     $$('[data-hist]', view()).forEach(b => b.onclick = () => payHistory(b.dataset.hist));
   }
 
-  async function payForm(id) {
+  async function payForm(id, id_tt) {
     const cn = await window.API.congNoByDon(id);
-    if (cn.remaining <= 0) return toast('Đơn đã thanh toán đủ', 'info');
+    const isEdit = !!id_tt;
+    let old = null;
+    if (isEdit) {
+      old = await window.API.getThanhToan(id_tt);
+      if (!old) return toast('Không tìm thấy giao dịch để sửa', 'error');
+    }
+    // Hạn mức nhập: khi sửa, được cộng lại số tiền của chính giao dịch đang sửa
+    const maxAllow = cn.remaining + (isEdit ? (Number(old.so_tien_thanh_toan) || 0) : 0);
+    if (!isEdit && cn.remaining <= 0) return toast('Đơn đã thanh toán đủ', 'info');
+
+    const opt = (v) => (sel) => v === sel ? 'selected' : '';
+    const htSel = isEdit ? old.hinh_thuc_thanh_toan : 'Chuyển khoản';
+
     openModal({
-      title: 'Ghi nhận thanh toán',
-      body: `<div class="alert sm">Còn lại: <b>${fmt(cn.remaining)}</b></div>
+      title: isEdit ? '✏️ Sửa giao dịch thanh toán' : 'Ghi nhận thanh toán',
+      body: `<div class="alert sm">Tối đa được nhập: <b>${fmt(maxAllow)}</b></div>
         <div class="form-grid">
-          <label>Số hóa đơn VAT<input id="p_hd"></label>
-          <label>Ngày hóa đơn<input id="p_nhd" type="date" value="${window.API.todayStr()}"></label>
-          <label>Số tiền (₫) *<input id="p_tien" type="number" min="0" max="${cn.remaining}" value="${cn.remaining}"></label>
-          <label>Ngày thanh toán<input id="p_ntt" type="date" value="${window.API.todayStr()}"></label>
-          <label>Hình thức<select id="p_ht"><option>Chuyển khoản</option><option>Tiền mặt</option></select></label>
-          <label>Người duyệt<input id="p_nguoi"></label>
-          <label class="col-2">Ghi chú<input id="p_gc"></label>
+          <label>Số hóa đơn VAT<input id="p_hd" value="${esc(isEdit ? (old.so_hoa_don_ncc || '') : '')}"></label>
+          <label>Ngày hóa đơn<input id="p_nhd" type="date" value="${esc(isEdit ? (old.ngay_xuat_hoa_don || window.API.todayStr()) : window.API.todayStr())}"></label>
+          <label>Số tiền (₫) *<input id="p_tien" type="number" min="0" max="${maxAllow}" value="${isEdit ? (old.so_tien_thanh_toan || 0) : maxAllow}"></label>
+          <label>Ngày thanh toán<input id="p_ntt" type="date" value="${esc(isEdit ? (old.ngay_thanh_toan || window.API.todayStr()) : window.API.todayStr())}"></label>
+          <label>Hình thức<select id="p_ht">
+            <option ${opt(htSel)('Chuyển khoản')}>Chuyển khoản</option>
+            <option ${opt(htSel)('Tiền mặt')}>Tiền mặt</option></select></label>
+          <label>Người duyệt<input id="p_nguoi" value="${esc(isEdit ? (old.nguoi_duyet_thanh_toan || '') : '')}"></label>
+          <label class="col-2">Ghi chú<input id="p_gc" value="${esc(isEdit ? (old.ghi_chu || '') : '')}"></label>
         </div>`,
       foot: [
-        { label: 'Hủy', class: 'btn-light', onClick: closeModal },
-        { label: 'Lưu thanh toán', class: 'btn-primary', onClick: async () => {
+        { label: 'Hủy', class: 'btn-light', onClick: () => payHistory(id) },
+        { label: isEdit ? 'Lưu thay đổi' : 'Lưu thanh toán', class: 'btn-primary', onClick: async () => {
           const tien = Number($('#p_tien').value);
           if (!tien || tien <= 0) return toast('Nhập số tiền hợp lệ', 'error');
-          if (tien > cn.remaining) return toast('Số tiền vượt quá công nợ còn lại', 'error');
+          if (tien > maxAllow + 0.001) return toast('Số tiền vượt quá công nợ còn lại', 'error');
           await window.API.saveThanhToan({
+            id_thanh_toan: isEdit ? id_tt : undefined,
             id_don_hang: id, so_hoa_don_ncc: $('#p_hd').value.trim(),
             ngay_xuat_hoa_don: $('#p_nhd').value, so_tien_thanh_toan: tien,
             ngay_thanh_toan: $('#p_ntt').value, hinh_thuc_thanh_toan: $('#p_ht').value,
             nguoi_duyet_thanh_toan: $('#p_nguoi').value.trim(), ghi_chu: $('#p_gc').value.trim(),
+            ngay_tao: isEdit ? old.ngay_tao : undefined,
           });
-          closeModal(); toast('Đã ghi nhận thanh toán', 'success'); renderThanhToan();
+          closeModal();
+          toast(isEdit ? 'Đã cập nhật giao dịch' : 'Đã ghi nhận thanh toán', 'success');
+          renderThanhToan();
         } },
       ],
     });
@@ -1353,13 +1642,79 @@
   async function payHistory(id) {
     const list = await window.API.listThanhToanByDon(id);
     const po = await window.API.getDonHang(id);
+    const cn = await window.API.congNoByDon(id);
     openModal({
-      title: 'Lịch sử thanh toán — ' + po.ma_don_hang,
-      body: list.length ? `<table class="tbl sm"><thead><tr><th>Ngày TT</th><th>Số HĐ</th><th>Số tiền</th><th>Hình thức</th><th>Người duyệt</th></tr></thead>
-        <tbody>${list.map(t => `<tr><td>${esc(t.ngay_thanh_toan)}</td><td>${esc(t.so_hoa_don_ncc || '')}</td>
-          <td>${fmt(t.so_tien_thanh_toan)}</td><td>${esc(t.hinh_thuc_thanh_toan)}</td><td>${esc(t.nguoi_duyet_thanh_toan || '')}</td></tr>`).join('')}</tbody></table>`
-        : emptyBox('Chưa có giao dịch.'),
-      foot: [{ label: 'Đóng', class: 'btn-light', onClick: closeModal }],
+      wide: true,
+      title: 'Giao dịch thanh toán — ' + po.ma_don_hang,
+      body: `
+        <div class="detail-head">
+          <div><small>Giá trị đơn</small><b>${fmt(cn.gia_tri)}</b></div>
+          <div><small>Đã trả</small><b class="txt-ok">${fmt(cn.paid)}</b></div>
+          <div><small>Còn lại</small><b class="${cn.remaining > 0 ? 'txt-danger' : 'txt-ok'}">${fmt(cn.remaining)}</b></div>
+        </div>
+        ${list.length ? `<table class="tbl sm"><thead><tr>
+          <th>Ngày TT</th><th>Số HĐ</th><th>Số tiền</th><th>Hình thức</th><th>Người duyệt</th><th>Thao tác</th></tr></thead>
+        <tbody>${list.map(t => `<tr>
+          <td>${esc(t.ngay_thanh_toan)}</td><td>${esc(t.so_hoa_don_ncc || '')}</td>
+          <td>${fmt(t.so_tien_thanh_toan)}</td><td>${esc(t.hinh_thuc_thanh_toan)}</td>
+          <td>${esc(t.nguoi_duyet_thanh_toan || '')}</td>
+          <td class="act">
+            <button class="ibtn ibtn-primary" data-ttview="${esc(t.id_thanh_toan)}" title="Xem">👁️</button>
+            <button class="ibtn ibtn-warn" data-ttedit="${esc(t.id_thanh_toan)}" title="Sửa">✏️</button>
+            <button class="ibtn ibtn-danger" data-ttdel="${esc(t.id_thanh_toan)}" title="Xóa">🗑️</button>
+          </td></tr>`).join('')}</tbody></table>`
+        : emptyBox('Chưa có giao dịch.')}`,
+      foot: [
+        { label: '💵 Thêm giao dịch', class: 'btn-primary', onClick: () => payForm(id) },
+        { label: 'Đóng', class: 'btn-light', onClick: closeModal },
+      ],
+    });
+
+
+    $$('[data-ttview]', $('#modalBody')).forEach(b => b.onclick = () => ttView(b.dataset.ttview, id));
+
+    $$('[data-ttedit]', $('#modalBody')).forEach(b => b.onclick = () => payForm(id, b.dataset.ttedit));
+
+    $$('[data-ttdel]', $('#modalBody')).forEach(b => b.onclick = () => ttDelete(b.dataset.ttdel, id));
+  }
+
+  // Xem chi tiết 1 giao dịch thanh toán
+  async function ttView(id_tt, id_don) {
+    const t = await window.API.getThanhToan(id_tt);
+    if (!t) return toast('Không tìm thấy giao dịch', 'error');
+    openModal({
+      title: '👁️ Chi tiết giao dịch thanh toán',
+      body: `<table class="tbl sm"><tbody>
+        <tr><td style="width:200px"><b>Số tiền</b></td><td>${fmt(t.so_tien_thanh_toan)}</td></tr>
+        <tr><td><b>Ngày thanh toán</b></td><td>${esc(t.ngay_thanh_toan || '')}</td></tr>
+        <tr><td><b>Số hóa đơn VAT</b></td><td>${esc(t.so_hoa_don_ncc || '')}</td></tr>
+        <tr><td><b>Ngày hóa đơn</b></td><td>${esc(t.ngay_xuat_hoa_don || '')}</td></tr>
+        <tr><td><b>Hình thức</b></td><td>${esc(t.hinh_thuc_thanh_toan || '')}</td></tr>
+        <tr><td><b>Người duyệt</b></td><td>${esc(t.nguoi_duyet_thanh_toan || '')}</td></tr>
+        <tr><td><b>Ghi chú</b></td><td>${esc(t.ghi_chu || '')}</td></tr>
+      </tbody></table>`,
+      foot: [
+        { label: 'Đóng', class: 'btn-light', onClick: () => payHistory(id_don) },
+        { label: '✏️ Sửa', class: 'btn-primary', onClick: () => payForm(id_don, id_tt) },
+      ],
+    });
+  }
+
+  // Xóa 1 giao dịch thanh toán
+  function ttDelete(id_tt, id_don) {
+    openModal({
+      title: 'Xác nhận xóa giao dịch',
+      body: `<p>Xóa giao dịch thanh toán này? Công nợ và trạng thái đơn sẽ được tính lại tự động.</p>`,
+      foot: [
+        { label: 'Hủy', class: 'btn-light', onClick: () => payHistory(id_don) },
+        { label: 'Xóa', class: 'btn-danger', onClick: async () => {
+          try {
+            await window.API.deleteThanhToan(id_tt);
+            toast('Đã xóa giao dịch', 'success');
+            payHistory(id_don);
+          } catch (e) { toast(e.message, 'error', 5000); }
+        } },
+      ],
     });
   }
 
@@ -1367,9 +1722,11 @@
    *  MÀN HÌNH 6 — DANH MỤC VẬT TƯ
    * ==================================================================== */
   async function renderDanhMuc() {
+    toolbarBtn('➕ Thêm vật tư', 'btn-primary', () => vatTuForm());
     toolbarBtn('Xuất Excel danh mục', 'btn-light', exportDataExcel, '📊');
     const [data, nhoms] = await Promise.all([window.API.listData(), window.API.listNhom()]);
     AppState.cache.dmData = data;
+    AppState.cache.dmNhoms = nhoms;
     view().innerHTML = `
       <div class="filter-bar">
         <input id="dmSearch" placeholder="🔍 Tìm tên / mã hàng…">
@@ -1383,11 +1740,24 @@
       const rows = data.filter(it => (!q || `${it.ten_hang_hoa} ${it.ma_hang}`.toLowerCase().includes(q)) && (!fn || it.id_nhom === fn)).slice(0, 200);
       $('#dmCount').textContent = `${rows.length} mặt hàng`;
       $('#dmWrap').innerHTML = card(`<table class="tbl"><thead><tr>
-        <th>Mã</th><th>Tên hàng hóa</th><th>ĐVT</th><th>Đơn giá</th><th>Nhóm</th><th>NCC</th><th>Chu kỳ</th><th>Hư hỏng</th></tr></thead>
+        <th>Mã</th><th>Tên hàng hóa</th><th>ĐVT</th><th>Đơn giá</th><th>Nhóm</th><th>NCC</th><th>Chu kỳ</th><th>Hư hỏng</th><th>Thao tác</th></tr></thead>
         <tbody>${rows.map(it => `<tr><td><b>${esc(it.ma_hang)}</b></td><td>${esc(it.ten_hang_hoa)}</td>
           <td>${esc(it.dvt)}</td><td>${fmt(it.don_gia)}</td><td>${esc(it.phan_loai_nhom_hang)}</td>
           <td>${esc(C.GROUP_TO_NCC[it.ma_nhom])}</td><td>${esc(it.chu_ky_thay_the)}</td>
-          <td>${it.muc_do_hu_hong === 'Dễ hư hỏng' ? '<span class="badge badge-amber">Dễ hư hỏng</span>' : esc(it.muc_do_hu_hong)}</td></tr>`).join('')}</tbody></table>`);
+          <td>${it.muc_do_hu_hong === 'Dễ hư hỏng' ? '<span class="badge badge-amber">Dễ hư hỏng</span>' : esc(it.muc_do_hu_hong)}</td>
+          <td class="act">
+            <button class="ibtn ibtn-primary" data-vtview="${esc(it.ma_hang)}" title="Xem">👁️</button>
+            <button class="ibtn" data-vtedit="${esc(it.ma_hang)}" title="Sửa">✏️</button>
+            <button class="ibtn ibtn-danger" data-vtdel="${esc(it.ma_hang)}" title="Xóa">🗑️</button>
+          </td></tr>`).join('')}</tbody></table>`);
+
+      // Gắn sự kiện cho các nút thao tác
+
+      $$('[data-vtview]', $('#dmWrap')).forEach(b => b.onclick = () => vatTuView(b.dataset.vtview));
+
+      $$('[data-vtedit]', $('#dmWrap')).forEach(b => b.onclick = () => vatTuForm(data.find(x => x.ma_hang === b.dataset.vtedit)));
+
+      $$('[data-vtdel]', $('#dmWrap')).forEach(b => b.onclick = () => vatTuDelete(b.dataset.vtdel));
     };
     $('#dmSearch').oninput = draw; $('#dmNhom').onchange = draw; draw();
   }
@@ -1406,6 +1776,298 @@
     setA4(ws);
     XLSX.writeFile(wb, 'DanhMuc_VatTu.xlsx'); toast('Đã xuất Excel danh mục', 'success');
   }
+
+    /* ====================================================================
+   *  DANH MỤC VẬT TƯ — THÊM / SỬA / XEM / XÓA
+   * ==================================================================== */
+  function vatTuForm(item) {
+    const e = item || {};
+    const isEdit = !!item;
+    const huHongOpts = ['Dễ hư hỏng', 'Trung bình', 'Bền'];
+    const cpOpts = ['Chi phí vật tư dụng cụ', 'Chi phí máy móc thiết bị', 'Chi phí dịch vụ'];
+
+    openModal({
+      wide: true,
+      title: isEdit ? ('✏️ Sửa vật tư — ' + esc(e.ma_hang)) : '➕ Thêm vật tư mới',
+      body: `
+        <div class="form-grid">
+          <label>Mã hàng * ${isEdit ? '(không đổi được)' : ''}
+            <input id="vt_ma" value="${esc(e.ma_hang || '')}" ${isEdit ? 'readonly' : ''} placeholder="VD: CDM-001"></label>
+          <label>Tên hàng hóa *
+            <input id="vt_ten" value="${esc(e.ten_hang_hoa || '')}"></label>
+          <label>Đơn vị tính (ĐVT) *
+            <input id="vt_dvt" value="${esc(e.dvt || '')}" placeholder="Cái / Mét / Bộ…"></label>
+          <label>Đơn giá (₫) *
+            <input id="vt_dg" type="number" min="0" value="${e.don_gia || ''}"></label>
+          <label>Giá thị trường (min - max)
+            <input id="vt_gtt" value="${esc(e.gia_thi_truong || '')}" placeholder="VD: 80000 - 130000"></label>
+          <label>Nhóm hàng *
+            <select id="vt_nhom">${C.DANH_MUC_NHOM.map(n => `<option value="${n.id_nhom}" data-ma="${n.ma_nhom}" data-ten="${esc(n.ten_nhom)}" ${e.id_nhom === n.id_nhom ? 'selected' : ''}>${esc(n.ten_nhom)} (${n.ma_nhom})</option>`).join('')}</select></label>
+          <label>Mục đích sử dụng
+            <input id="vt_md" value="${esc(e.muc_dich_su_dung || '')}"></label>
+          <label>Mức độ hư hỏng *
+            <select id="vt_hh">${huHongOpts.map(h => `<option ${e.muc_do_hu_hong === h ? 'selected' : ''}>${h}</option>`).join('')}</select></label>
+          <label>Chu kỳ thay thế *
+            <input id="vt_ck" value="${esc(e.chu_ky_thay_the || '')}" placeholder="VD: từ 3 đến 6 tháng / 1 tháng"></label>
+          <label>Phân loại chi phí
+            <select id="vt_cp">${cpOpts.map(c => `<option ${e.phan_loai_chi_phi === c ? 'selected' : ''}>${c}</option>`).join('')}</select></label>
+        </div>
+        <div class="btn-row" style="margin:6px 0">
+          <button type="button" class="btn btn-sm btn-warn" id="vt_ai_suggest">🤖 AI đề xuất thông tin còn thiếu</button>
+          <span class="muted" id="vt_ai_note"></span>
+        </div>
+        <div class="alert sm">Lưu ý: Chu kỳ thay thế ghi dạng "từ 3 đến 6 tháng" hoặc "1 tháng" để hệ thống tính đúng khi tạo đơn tự động. Nhà cung cấp được xác định tự động theo Nhóm hàng. Nút "🤖 AI đề xuất" sẽ gợi ý Giá thị trường, Mục đích, Mức độ hư hỏng, Chu kỳ thay thế và Phân loại chi phí dựa trên Tên hàng + Nhóm (cần Gemini API Key).</div>`,
+      foot: [
+        { label: 'Hủy', class: 'btn-light', onClick: closeModal },
+        { label: '💾 Lưu', class: 'btn-primary', onClick: async () => {
+          const ma = $('#vt_ma').value.trim();
+          const ten = $('#vt_ten').value.trim();
+          const dvt = $('#vt_dvt').value.trim();
+          const dg = Number($('#vt_dg').value);
+          if (!ma || !ten || !dvt || !dg) return toast('Nhập đủ Mã, Tên, ĐVT, Đơn giá', 'error');
+
+          // chống trùng mã khi thêm mới
+          if (!isEdit) {
+            const exist = await window.API.getDataItem(ma);
+            if (exist) return toast('Mã hàng đã tồn tại, hãy chọn mã khác', 'error');
+          }
+
+          const sel = $('#vt_nhom').options[$('#vt_nhom').selectedIndex];
+          const id_nhom = sel.value;
+          const ma_nhom = sel.dataset.ma;
+          const ten_nhom = sel.dataset.ten;
+
+          await window.API.saveDataItem({
+            ma_hang: ma,
+            ten_hang_hoa: ten,
+            dvt: dvt,
+            don_gia: dg,
+            gia_thi_truong: $('#vt_gtt').value.trim(),
+            phan_loai_nhom_hang: ten_nhom,
+            id_nhom: id_nhom,
+            ma_nhom: ma_nhom,
+            nha_cung_cap: C.GROUP_TO_NCC[ma_nhom],
+            muc_dich_su_dung: $('#vt_md').value.trim(),
+            muc_do_hu_hong: $('#vt_hh').value,
+            chu_ky_thay_the: $('#vt_ck').value.trim(),
+            phan_loai_chi_phi: $('#vt_cp').value,
+          });
+          closeModal();
+          toast(isEdit ? 'Đã cập nhật vật tư' : 'Đã thêm vật tư mới', 'success');
+          AppState.cache.dmData = null; // buộc tải lại
+          renderDanhMuc();
+        } },
+      ],
+    });
+
+    // Gắn sự kiện nút "AI đề xuất thông tin" (sau khi modal đã render)
+    const btnAi = document.getElementById('vt_ai_suggest');
+    if (btnAi) btnAi.onclick = async () => {
+      const ai = await window.API.aiStatus();
+      if (!ai.gemini) return toast('Chưa cấu hình Gemini API Key (vào Cài đặt để thêm)', 'error', 5000);
+      const ten = $('#vt_ten').value.trim();
+      if (!ten) return toast('Hãy nhập Tên hàng hóa trước khi nhờ AI', 'error');
+      const selNhom = $('#vt_nhom').options[$('#vt_nhom').selectedIndex];
+      const ten_nhom = selNhom ? selNhom.dataset.ten : '';
+      const note = document.getElementById('vt_ai_note');
+      const old = btnAi.textContent; btnAi.textContent = '⏳ Đang hỏi AI…'; btnAi.disabled = true;
+      if (note) note.textContent = '';
+      try {
+        const s = await window.API.suggestNewItemFields({
+          ten_hang_hoa: ten, ten_nhom,
+          dvt: $('#vt_dvt').value.trim(), don_gia: Number($('#vt_dg').value) || 0,
+        });
+        // Điền vào các ô (chỉ điền nếu AI có trả về)
+        if (s.gia_thi_truong) $('#vt_gtt').value = s.gia_thi_truong;
+        if (s.muc_dich_su_dung) $('#vt_md').value = s.muc_dich_su_dung;
+        if (s.muc_do_hu_hong) {
+          const opt = Array.from($('#vt_hh').options).find(o => o.value === s.muc_do_hu_hong);
+          if (opt) $('#vt_hh').value = s.muc_do_hu_hong;
+        }
+        if (s.chu_ky_thay_the) $('#vt_ck').value = s.chu_ky_thay_the;
+        if (s.phan_loai_chi_phi) {
+          const opt = Array.from($('#vt_cp').options).find(o => o.value === s.phan_loai_chi_phi);
+          if (opt) $('#vt_cp').value = s.phan_loai_chi_phi;
+        }
+        if (note) note.textContent = '✅ Đã điền gợi ý — vui lòng kiểm tra & chỉnh lại nếu cần.';
+        toast('AI đã đề xuất thông tin', 'success');
+      } catch (e) {
+        if (note) note.textContent = '⚠️ ' + e.message;
+        toast('Lỗi AI: ' + e.message, 'error', 5000);
+      } finally {
+        btnAi.textContent = old; btnAi.disabled = false;
+      }
+    };
+  }
+
+  async function vatTuView(ma) {
+    const it = await window.API.getDataItem(ma);
+    if (!it) return toast('Không tìm thấy vật tư', 'error');
+    openModal({
+      wide: true,
+      title: '👁️ Chi tiết vật tư — ' + esc(it.ma_hang),
+      body: `
+        <table class="tbl sm">
+          <tbody>
+            <tr><td style="width:200px"><b>Mã hàng</b></td><td>${esc(it.ma_hang)}</td></tr>
+            <tr><td><b>Tên hàng hóa</b></td><td>${esc(it.ten_hang_hoa)}</td></tr>
+            <tr><td><b>ĐVT</b></td><td>${esc(it.dvt)}</td></tr>
+            <tr><td><b>Đơn giá</b></td><td>${fmt(it.don_gia)}</td></tr>
+            <tr><td><b>Giá thị trường</b></td><td>${esc(it.gia_thi_truong || '')}</td></tr>
+            <tr><td><b>Nhóm hàng</b></td><td>${esc(it.phan_loai_nhom_hang)} (${esc(it.id_nhom)} / ${esc(it.ma_nhom)})</td></tr>
+            <tr><td><b>Nhà cung cấp</b></td><td>${esc(C.GROUP_TO_NCC[it.ma_nhom])}</td></tr>
+            <tr><td><b>Mục đích sử dụng</b></td><td>${esc(it.muc_dich_su_dung || '')}</td></tr>
+            <tr><td><b>Mức độ hư hỏng</b></td><td>${esc(it.muc_do_hu_hong)}</td></tr>
+            <tr><td><b>Chu kỳ thay thế</b></td><td>${esc(it.chu_ky_thay_the)}</td></tr>
+            <tr><td><b>Phân loại chi phí</b></td><td>${esc(it.phan_loai_chi_phi || '')}</td></tr>
+          </tbody>
+        </table>`,
+      foot: [
+        { label: 'Đóng', class: 'btn-light', onClick: closeModal },
+        { label: '✏️ Sửa', class: 'btn-primary', onClick: () => vatTuForm(it) },
+      ],
+    });
+  }
+
+  function vatTuDelete(ma) {
+    openModal({
+      title: 'Xác nhận xóa', body: `<p>Xóa vật tư <b>${esc(ma)}</b> khỏi danh mục?</p>
+        <div class="alert alert-warn sm">Lưu ý: việc xóa không ảnh hưởng các đơn hàng cũ đã chứa mặt hàng này.</div>`,
+      foot: [
+        { label: 'Hủy', class: 'btn-light', onClick: closeModal },
+        { label: 'Xóa', class: 'btn-danger', onClick: async () => {
+          await window.API.deleteDataItem(ma);
+          closeModal();
+          toast('Đã xóa vật tư', 'success');
+          AppState.cache.dmData = null;
+          renderDanhMuc();
+        } },
+      ],
+    });
+  }
+
+    /* ====================================================================
+   *  MÀN HÌNH — NHÓM PHỤ TRÁCH (CRUD nhóm hàng, liên kết NCC & DATA)
+   * ==================================================================== */
+  async function renderNhom() {
+    toolbarBtn('➕ Thêm nhóm', 'btn-primary', () => nhomForm());
+    const [nhoms, nccs, countMap] = await Promise.all([
+      window.API.listNhom(), window.API.listNCC(), window.API.countItemsByNhom(),
+    ]);
+    const nccMap = Object.fromEntries(nccs.map(n => [n.id_ncc, n.ten_ncc]));
+    if (!nhoms.length) { view().innerHTML = emptyBox('Chưa có nhóm. Nhấn "Thêm nhóm".'); return; }
+
+    view().innerHTML = card(`
+      <table class="tbl">
+        <thead><tr><th>ID nhóm</th><th>Mã nhóm</th><th>Tên nhóm</th>
+          <th>NCC phụ trách</th><th>Số vật tư</th><th>Thao tác</th></tr></thead>
+        <tbody>${nhoms.map(n => {
+          const ncc = C.GROUP_TO_NCC[n.ma_nhom] || '—';
+          return `<tr>
+            <td><b>${esc(n.id_nhom)}</b></td>
+            <td>${esc(n.ma_nhom)}</td>
+            <td>${esc(n.ten_nhom)}</td>
+            <td>${esc(ncc)}${nccMap[ncc] ? ' - ' + esc(nccMap[ncc]) : ''}</td>
+            <td style="text-align:center">${countMap[n.id_nhom] || 0}</td>
+            <td class="act">
+              <button class="ibtn ibtn-primary" data-nhview="${esc(n.id_nhom)}" title="Xem">👁️</button>
+              <button class="ibtn" data-nhedit="${esc(n.id_nhom)}" title="Sửa">✏️</button>
+              <button class="ibtn ibtn-danger" data-nhdel="${esc(n.id_nhom)}" title="Xóa">🗑️</button>
+            </td></tr>`;
+        }).join('')}</tbody>
+      </table>`);
+
+
+    $$('[data-nhview]', view()).forEach(b => b.onclick = () => nhomView(b.dataset.nhview));
+
+    $$('[data-nhedit]', view()).forEach(b => b.onclick = async () => nhomForm(await window.API.getNhom(b.dataset.nhedit)));
+
+    $$('[data-nhdel]', view()).forEach(b => b.onclick = () => nhomDelete(b.dataset.nhdel));
+  }
+
+  async function nhomForm(nhom) {
+    const e = nhom || {};
+    const isEdit = !!nhom;
+    const nccs = await window.API.listNCC();
+    // Mã nhóm (ma_nhom) quyết định NCC phụ trách qua GROUP_TO_NCC
+    const maOpts = Object.keys(C.GROUP_TO_NCC);
+    openModal({
+      title: isEdit ? ('✏️ Sửa nhóm — ' + esc(e.id_nhom)) : '➕ Thêm nhóm phụ trách',
+      body: `
+        <div class="form-grid">
+          <label>ID nhóm ${isEdit ? '(không đổi được)' : '(tự sinh nếu để trống)'}
+            <input id="nh_id" value="${esc(e.id_nhom || '')}" ${isEdit ? 'readonly' : ''} placeholder="VD: NH13"></label>
+          <label>Tên nhóm *
+            <input id="nh_ten" value="${esc(e.ten_nhom || '')}" placeholder="VD: Vật tư điện nước"></label>
+          <label class="col-2">Mã nhóm (xác định NCC phụ trách) *
+            <select id="nh_ma">${maOpts.map(m => `<option value="${m}" ${e.ma_nhom === m ? 'selected' : ''}>${m} → ${esc((nccs.find(x => x.id_ncc === C.GROUP_TO_NCC[m]) || {}).ten_ncc || C.GROUP_TO_NCC[m])}</option>`).join('')}</select></label>
+        </div>
+        <div class="alert sm">Mỗi nhóm gắn với 1 <b>mã nhóm</b>; mã nhóm quyết định <b>Nhà cung cấp phụ trách</b> (theo cấu hình GROUP_TO_NCC). Khi tạo đơn tự động, vật tư thuộc nhóm sẽ về đúng NCC này.</div>`,
+      foot: [
+        { label: 'Hủy', class: 'btn-light', onClick: closeModal },
+        { label: '💾 Lưu', class: 'btn-primary', onClick: async () => {
+          const ten = $('#nh_ten').value.trim();
+          const ma = $('#nh_ma').value;
+          if (!ten || !ma) return toast('Nhập đủ Tên nhóm và Mã nhóm', 'error');
+          let id = $('#nh_id').value.trim();
+          // chống trùng ID khi thêm mới
+          if (!isEdit && id) {
+            const exist = await window.API.getNhom(id);
+            if (exist) return toast('ID nhóm đã tồn tại, hãy chọn ID khác', 'error');
+          }
+          await window.API.saveNhom({
+            id_nhom: isEdit ? e.id_nhom : (id || undefined),
+            ma_nhom: ma,
+            ten_nhom: ten,
+          });
+          closeModal();
+          toast(isEdit ? 'Đã cập nhật nhóm' : 'Đã thêm nhóm', 'success');
+          renderNhom();
+        } },
+      ],
+    });
+  }
+
+  async function nhomView(id) {
+    const n = await window.API.getNhom(id);
+    if (!n) return toast('Không tìm thấy nhóm', 'error');
+    const nccs = await window.API.listNCC();
+    const ncc = C.GROUP_TO_NCC[n.ma_nhom];
+    const tenNcc = (nccs.find(x => x.id_ncc === ncc) || {}).ten_ncc || ncc;
+    const countMap = await window.API.countItemsByNhom();
+    openModal({
+      title: '👁️ Chi tiết nhóm — ' + esc(n.id_nhom),
+      body: `<table class="tbl sm"><tbody>
+        <tr><td style="width:200px"><b>ID nhóm</b></td><td>${esc(n.id_nhom)}</td></tr>
+        <tr><td><b>Mã nhóm</b></td><td>${esc(n.ma_nhom)}</td></tr>
+        <tr><td><b>Tên nhóm</b></td><td>${esc(n.ten_nhom)}</td></tr>
+        <tr><td><b>NCC phụ trách</b></td><td>${esc(ncc)} - ${esc(tenNcc)}</td></tr>
+        <tr><td><b>Số vật tư thuộc nhóm</b></td><td>${countMap[n.id_nhom] || 0}</td></tr>
+      </tbody></table>`,
+      foot: [
+        { label: 'Đóng', class: 'btn-light', onClick: closeModal },
+        { label: '✏️ Sửa', class: 'btn-primary', onClick: () => nhomForm(n) },
+      ],
+    });
+  }
+
+  function nhomDelete(id) {
+    openModal({
+      title: 'Xác nhận xóa nhóm',
+      body: `<p>Xóa nhóm <b>${esc(id)}</b>?</p>
+        <div class="alert alert-warn sm">Nếu nhóm còn vật tư, hệ thống sẽ chặn để bảo toàn dữ liệu.</div>`,
+      foot: [
+        { label: 'Hủy', class: 'btn-light', onClick: closeModal },
+        { label: 'Xóa', class: 'btn-danger', onClick: async () => {
+          try {
+            await window.API.deleteNhom(id);
+            closeModal(); toast('Đã xóa nhóm', 'success'); renderNhom();
+          } catch (e) { toast(e.message, 'error', 5000); }
+        } },
+      ],
+    });
+  }
+
 
   /* ====================================================================
    *  MÀN HÌNH 7 — NHÀ CUNG CẤP
@@ -1501,10 +2163,15 @@
       ...Object.entries(r.ctAgg).map(([id, a], i) => { const c = r.ctMap[id]; const pct = a.budget ? (a.spent / a.budget * 100).toFixed(0) + '%' : '0%';
         return [i + 1, c ? c.ma_cong_trinh : id, c ? c.ten_cong_trinh : '', a.plans, a.budget, a.spent, a.budget - a.spent, pct]; })]);
     XLSX.utils.book_append_sheet(wb, wsCt, 'TheoCongTrinh');
-    const rng = XLSX.utils.decode_range(ws['!ref']);
-    styleRange(ws, 0, 0, 0, rng.e.c, () => XL.head());
-    styleRange(ws, 1, rng.e.r, 0, rng.e.c, (r,c)=> [4].includes(c) ? XL.money() : XL.cell('left'));
-    setA4(ws);
+    // Tô khung cho cả 2 sheet (sửa lỗi 'ws is not defined')
+    [wsNcc, wsCt].forEach(sheet => {
+      const rng = XLSX.utils.decode_range(sheet['!ref']);
+      if (typeof styleRange === 'function' && typeof XL !== 'undefined') {
+        styleRange(sheet, 0, 0, 0, rng.e.c, () => XL.head());
+        styleRange(sheet, 1, rng.e.r, 0, rng.e.c, (r, c) => XL.cell('left'));
+      }
+      if (typeof setA4 === 'function') setA4(sheet);
+    });
     XLSX.writeFile(wb, 'BaoCao_MuaSam.xlsx'); toast('Đã xuất báo cáo Excel', 'success');
   }
 
@@ -1513,18 +2180,22 @@
    * ==================================================================== */
   async function renderCaiDat() {
     const gKey = await window.API.getSetting('gemini_key') || '';
-    const nKey = await window.API.getSetting('nvidia_key') || '';
     const ai = await window.API.aiStatus();
+    const curModel = ai.model;
     view().innerHTML = `
-      ${card(`<h3>🤖 Tích hợp AI (tùy chọn)</h3>
-        <p class="muted">Để trống = dùng thuật toán nội bộ (miễn phí, chạy offline). Nhập key để bật AI đám mây. Hiện tại: <b>${ai.mode}</b>.</p>
+      ${card(`<h3>🤖 Tích hợp AI — Google Gemini (tùy chọn)</h3>
+        <p class="muted">Để trống = dùng thuật toán nội bộ (miễn phí, chạy offline). Nhập Gemini key để bật gợi ý thay thế bằng AI. Hiện tại: <b>${ai.mode}</b> · Model: <b>${esc(ai.model)}</b>.</p>
         <div class="form-grid">
-          <label class="col-2">Google Gemini API Key (gợi ý thay thế)
+          <label class="col-2">Google Gemini API Key
             <input id="set_gemini" type="password" value="${esc(gKey)}" placeholder="AIza…"></label>
-          <label class="col-2">NVIDIA NIM API Key (tối ưu phân bổ PO)
-            <input id="set_nvidia" type="password" value="${esc(nKey)}" placeholder="nvapi-…"></label>
+          <label class="col-2">Model Gemini (chọn hoặc bấm "Cập nhật model")
+            <select id="set_gmodel"><option value="${esc(curModel)}">${esc(curModel)}</option></select></label>
         </div>
-        <button class="btn btn-primary" id="btnSaveKeys">Lưu khóa AI</button>`)}
+        <div class="btn-row">
+          <button class="btn btn-light" id="btnFetchModels">🔄 Cập nhật model mới nhất</button>
+          <button class="btn btn-primary" id="btnSaveKeys">💾 Lưu cấu hình AI</button>
+        </div>
+        <p class="muted" style="margin-top:8px">💡 Gợi ý model theo mức độ ưu tiên (tối ưu nhất → dự phòng): <b>gemini-2.5-flash</b> (khuyến nghị: nhanh, rẻ, đủ mạnh) → <b>gemini-2.5-pro</b> (chính xác cao hơn, chậm/đắt hơn) → <b>gemini-2.0-flash</b> (ổn định) → <b>gemini-1.5-flash</b> (dự phòng). Bạn có thể chọn bất kỳ model nào trong danh sách.</p>`)}
       ${card(`<h3>💾 Sao lưu / Phục hồi (R-04)</h3>
         <p class="muted">Xuất toàn bộ dữ liệu IndexedDB ra file JSON để phòng mất dữ liệu khi xóa cache trình duyệt.</p>
         <div class="btn-row">
@@ -1543,9 +2214,25 @@
 
     $('#btnSaveKeys').onclick = async () => {
       await window.API.setSetting('gemini_key', $('#set_gemini').value.trim());
-      await window.API.setSetting('nvidia_key', $('#set_nvidia').value.trim());
-      const s = await window.API.aiStatus(); $('#aiStatusPill').textContent = 'TanDigitalAI: ' + s.mode;
-      toast('Đã lưu khóa AI', 'success');
+      await window.API.setSetting('gemini_model', $('#set_gmodel').value);
+      const s = await window.API.aiStatus(); $('#aiStatusPill').textContent = 'TandigitalAI: ' + s.mode;
+      toast('Đã lưu cấu hình AI', 'success');
+    };
+    $('#btnFetchModels').onclick = async () => {
+      const key = $('#set_gemini').value.trim();
+      if (!key) return toast('Hãy nhập Gemini API Key trước', 'error');
+      const btn = $('#btnFetchModels'); const old = btn.textContent; btn.textContent = '⏳ Đang tải…'; btn.disabled = true;
+      try {
+        const models = await window.API.listGeminiModels(key);
+        if (!models.length) throw new Error('Không lấy được model nào');
+        // ưu tiên hiển thị các model flash/pro mới lên đầu
+        const rank = m => (/2\.5-flash/.test(m) ? 0 : /2\.5-pro/.test(m) ? 1 : /2\.0-flash/.test(m) ? 2 : /flash/.test(m) ? 3 : 4);
+        models.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+        const sel = $('#set_gmodel');
+        sel.innerHTML = models.map(m => `<option value="${esc(m)}" ${m === curModel ? 'selected' : ''}>${esc(m)}</option>`).join('');
+        toast(`Đã cập nhật ${models.length} model Gemini`, 'success');
+      } catch (e) { toast('Lỗi cập nhật model: ' + e.message, 'error', 5000); }
+      finally { btn.textContent = old; btn.disabled = false; }
     };
     $('#btnBackup').onclick = async () => {
       const dump = await window.API.exportBackup();
@@ -1663,12 +2350,13 @@
           <label class="col-2"><input type="checkbox" id="ag_dehu" style="width:auto"> Chỉ chọn vật tư "Dễ hư hỏng"</label>
           <label class="col-2">Mức lấp đầy mỗi đơn: <b id="ag_fr_lbl">92%</b>
             <input type="range" id="ag_fr" min="60" max="100" value="92" oninput="document.getElementById('ag_fr_lbl').textContent=this.value+'%'"></label>
+          <label class="col-2">Mức tỷ lệ cho phép trùng mặt hàng: <b id="ag_dup_lbl">0%</b>
+            <input type="range" id="ag_dup" min="0" max="100" value="0" oninput="document.getElementById('ag_dup_lbl').textContent=this.value+'%'"></label>
         </div>
         <div class="alert sm">Hệ thống sẽ tự chọn vật tư, cân số lượng nguyên dương, và tách thành nhiều đơn sao cho mỗi đơn nằm trong [min, max] và tổng ≤ ngân sách kế hoạch.</div>`,
       foot: [
         { label: 'Hủy', class: 'btn-light', onClick: closeModal },
-        { label: '🧮 Bằng thuật toán', class: 'btn-primary', onClick: () => runAutoGenerate(false) },
-        { label: ai.nvidia ? '🤖 Bằng AI (NVIDIA)' : '🤖 AI (cần key)', class: 'btn-warn', onClick: () => runAutoGenerate(true) },
+        { label: '🧮 Tạo đơn (thuật toán)', class: 'btn-primary', onClick: () => runAutoGenerate(false) },
       ],
     });
     // Điều khiển 2 dropdown tick chọn nhiều
@@ -1710,10 +2398,11 @@
     const params = {
       thang_nam: kh.thang_nam, budget, minOrder, maxOrder,
       opts: {
-        id_ncc:  pickChk('ddpanel_ncc'),   // mảng [] (Debug 1)
-        id_nhom: pickChk('ddpanel_nhom'),  // mảng [] (Debug 1)
+        id_ncc:  pickChk('ddpanel_ncc'),   // mảng []
+        id_nhom: pickChk('ddpanel_nhom'),  // mảng []
         onlyDeHuHong: $('#ag_dehu').checked,
         fillRatio: Number($('#ag_fr').value) / 100,
+        dupRatio: Number($('#ag_dup').value) / 100,  // Debug 4: tỷ lệ cho phép trùng kỳ trước
       },
     };
 
@@ -1754,10 +2443,46 @@
       foot: [
         { label: 'Hủy', class: 'btn-light', onClick: () => { AppState.poPreview = null; closeModal(); } },
         { label: '🔄 Sinh lại', class: 'btn-light', onClick: openAutoGenerate },
+        { label: '🤖 Phân tích bằng AI', class: 'btn-warn', onClick: () => runAiAnalyze() },
         { label: `✅ Xác nhận tạo đơn`, class: 'btn-primary', onClick: () => commitPOs() },
       ],
     });
     renderPreviewEditor();
+  }
+
+  // Gọi AI phân tích các đơn đang xem trước, hiển thị kết quả ngay trong modal
+  async function runAiAnalyze() {
+    const ai = await window.API.aiStatus();
+    if (!ai.gemini) {
+      return toast('Chưa cấu hình Gemini API Key (vào Cài đặt để thêm)', 'error', 5000);
+    }
+    const result = AppState.poPreview;
+    if (!result || !result.purchase_orders.length) return toast('Không có đơn để phân tích', 'error');
+
+    // tạo / hiện vùng kết quả
+    let box = document.getElementById('aiAnalyzeBox');
+    if (!box) {
+      box = document.createElement('div');
+      box.id = 'aiAnalyzeBox';
+      box.className = 'alert';
+      const sum = document.getElementById('poEditSum');
+      if (sum && sum.parentNode) sum.parentNode.insertBefore(box, sum);
+    }
+    box.innerHTML = '<div class="loading">🤖 AI đang phân tích các đơn…</div>';
+
+    try {
+      const ctx = {
+        thang_nam: AppState.planDraft ? AppState.planDraft.thang_nam : '',
+        budget: AppState.cache.previewBudget,
+        minOrder: C.ORDER_CONSTRAINTS.MIN_ORDER, maxOrder: C.ORDER_CONSTRAINTS.MAX_ORDER,
+      };
+      const text = await window.API.analyzePurchaseOrders(result.purchase_orders, ctx);
+      // chuyển xuống dòng -> HTML đơn giản (an toàn: escape trước)
+      box.innerHTML = `<b>🤖 Nhận xét của AI (model ${esc(ai.model)}):</b><br>` +
+        esc(text).replace(/\n/g, '<br>');
+    } catch (e) {
+      box.innerHTML = `<span class="txt-danger">Lỗi gọi AI: ${esc(e.message)}</span>`;
+    }
   }
 
   // Render lại toàn bộ editor preview từ AppState.poPreview
